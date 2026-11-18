@@ -6,255 +6,228 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useRoomStore } from '../../store/useRoomStore';
 import { ProjectData } from '../../types/room';
-import {
-  Folder,
-  Download,
-  Upload,
-  Plus,
-  Trash2,
-  X,
-  FileText,
-  RotateCcw,
-  Check,
-} from 'lucide-react';
+import { ROOM_TEMPLATES } from '../../constants/templates';
+import { Modal } from '../ui/Modal';
+import { downloadFile } from '../../utils/files';
+import { FolderOpen, Download, Upload, Save, Trash2, LayoutTemplate, Clock, RefreshCw } from 'lucide-react';
 
 const LOCAL_STORAGE_KEY = 'artwall_saved_projects_v1';
 
-export const ProjectModal: React.FC = () => {
-  const {
-    projectModalOpen,
-    loadProject,
-    resetToTemplate,
-    exportProjectJSON,
-    setProjectModalOpen,
-  } = useRoomStore();
+function readSaved(): ProjectData[] {
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
 
-  const [savedProjects, setSavedProjects] = useState<ProjectData[]>([]);
-  const [newProjectName, setNewProjectName] = useState('La Mia Stanza 3D');
+const TemplateThumb: React.FC<{ id: string }> = ({ id }) => {
+  const tpl = ROOM_TEMPLATES.find((t) => t.id === id)!;
+  const scene = tpl.build();
+  const xs = scene.room.vertices.map((v) => v.x);
+  const ys = scene.room.vertices.map((v) => v.y);
+  const minX = Math.min(...xs), maxX = Math.max(...xs), minY = Math.min(...ys), maxY = Math.max(...ys);
+  const pad = 40;
+  return (
+    <svg viewBox={`${minX - pad} ${minY - pad} ${maxX - minX + pad * 2} ${maxY - minY + pad * 2}`} className="w-full h-full">
+      <polygon points={scene.room.vertices.map((v) => `${v.x},${v.y}`).join(' ')} fill={scene.room.floorColor} stroke="#cfcfd8" strokeWidth="10" strokeLinejoin="round" />
+      {scene.furniture.map((f) => {
+        const rot = f.rotationY % 180 !== 0;
+        const w = rot ? f.depth : f.width;
+        const d = rot ? f.width : f.depth;
+        return <rect key={f.id} x={f.position.x - w / 2} y={f.position.z - d / 2} width={w} height={d} rx="8" fill={f.color} />;
+      })}
+    </svg>
+  );
+};
+
+export const ProjectModal: React.FC = () => {
+  const open = useRoomStore((s) => s.projectModalOpen);
+  const { loadProject, resetToTemplate, exportProjectJSON, setProjectModalOpen, notify } = useRoomStore.getState();
+
+  const [saved, setSaved] = useState<ProjectData[]>([]);
+  const [name, setName] = useState('La mia stanza');
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
-  // Load saved list on mount
   useEffect(() => {
-    try {
-      const raw = localStorage.getItem(LOCAL_STORAGE_KEY);
-      if (raw) {
-        setSavedProjects(JSON.parse(raw));
-      }
-    } catch (e) {
-      console.error(e);
+    if (open) {
+      setSaved(readSaved());
+      setConfirmDelete(null);
     }
-  }, [projectModalOpen]);
+  }, [open]);
 
-  if (!projectModalOpen) return null;
-
-  const handleSaveCurrent = () => {
+  const persist = (list: ProjectData[]) => {
     try {
-      const jsonStr = exportProjectJSON();
-      const project: ProjectData = JSON.parse(jsonStr);
-      project.name = newProjectName || 'Progetto Stanza';
-      project.updatedAt = new Date().toISOString();
-
-      const existing = savedProjects.filter((p) => p.id !== project.id);
-      const updated = [project, ...existing];
-      setSavedProjects(updated);
-      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
-    } catch (e) {
-      console.error(e);
+      localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(list));
+      setSaved(list);
+      return true;
+    } catch {
+      notify('Spazio del browser esaurito: esporta il progetto in JSON.', 'error');
+      return false;
     }
   };
 
-  const handleDelete = (id: string, e: React.MouseEvent) => {
-    e.stopPropagation();
-    const updated = savedProjects.filter((p) => p.id !== id);
-    setSavedProjects(updated);
-    localStorage.setItem(LOCAL_STORAGE_KEY, JSON.stringify(updated));
+  const handleSave = (overwriteId?: string) => {
+    const project: ProjectData = JSON.parse(exportProjectJSON(name.trim() || 'Progetto senza nome'));
+    if (overwriteId) {
+      const old = saved.find((p) => p.id === overwriteId);
+      project.id = overwriteId;
+      project.name = old?.name || project.name;
+    } else {
+      const sameName = saved.find((p) => p.name === project.name);
+      if (sameName) project.id = sameName.id;
+    }
+    const list = [project, ...saved.filter((p) => p.id !== project.id)];
+    if (persist(list)) notify(`Progetto “${project.name}” salvato`, 'success');
   };
 
-  const handleExportFile = () => {
-    const jsonStr = exportProjectJSON();
-    const blob = new Blob([jsonStr], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `artwall-progetto-${Date.now()}.json`;
-    a.click();
-    URL.revokeObjectURL(url);
-  };
-
-  const handleImportFile = (e: React.ChangeEvent<HTMLInputElement>) => {
+  const handleImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
+    e.target.value = '';
     if (!file) return;
-
     const reader = new FileReader();
-    reader.onload = (event) => {
+    reader.onload = () => {
       try {
-        const parsed = JSON.parse(event.target?.result as string);
-        if (parsed.room && parsed.furniture && parsed.artworks) {
-          loadProject(parsed);
-          setProjectModalOpen(false);
-        }
-      } catch (err) {
-        alert('File di progetto non valido');
+        const parsed = JSON.parse(reader.result as string);
+        if (loadProject(parsed)) notify(`Progetto “${parsed.name || file.name}” importato`, 'success');
+        else notify('Il file non contiene un progetto ArtWall valido.', 'error');
+      } catch {
+        notify('File JSON non leggibile.', 'error');
       }
     };
     reader.readAsText(file);
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-      <div className="relative w-full max-w-2xl bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl flex flex-col overflow-hidden text-neutral-100">
-        {/* Header */}
-        <div className="h-14 px-6 border-b border-neutral-800 flex items-center justify-between shrink-0 bg-neutral-900/80">
-          <div className="flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-lg bg-cyan-600/20 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-              <Folder className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-semibold tracking-wide">
-                Gestione Progetti e Modelli
-              </h2>
-              <p className="text-[11px] text-neutral-400">
-                Salva, carica, esporta in JSON o carica layout preimpostati
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => setProjectModalOpen(false)}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
-        </div>
-
-        <div className="p-6 flex flex-col gap-6 max-h-[75vh] overflow-y-auto">
-          {/* Quick Preconfigured Templates */}
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 mb-3">
-              Modelli di Stanza Predefiniti
-            </h3>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+    <Modal
+      open={open}
+      onClose={() => setProjectModalOpen(false)}
+      title="Progetti"
+      subtitle="Il lavoro viene salvato automaticamente in questo browser. Qui puoi creare versioni, esportare e ripartire da un modello."
+      icon={<FolderOpen className="w-4 h-4" />}
+      size="lg"
+    >
+      <div className="p-5 sm:p-6 flex flex-col gap-7">
+        {/* Templates */}
+        <section className="flex flex-col gap-3">
+          <h3 className="eyebrow flex items-center gap-2">
+            <LayoutTemplate className="w-3.5 h-3.5" /> Inizia da un modello
+          </h3>
+          <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+            {ROOM_TEMPLATES.map((t) => (
               <button
+                key={t.id}
                 onClick={() => {
-                  resetToTemplate('living-sofa');
+                  resetToTemplate(t.id);
                   setProjectModalOpen(false);
                 }}
-                className="p-3.5 rounded-lg border border-neutral-800 hover:border-cyan-500/60 bg-neutral-950/60 hover:bg-neutral-950 text-left transition-all group"
+                className="card text-left overflow-hidden hover:border-brass-500/45 transition-colors group"
               >
-                <p className="text-xs font-semibold text-white group-hover:text-cyan-400">
-                  Soggiorno Moderno con Divano
-                </p>
-                <p className="text-[11px] text-neutral-400 mt-1">
-                  Stanza rettangolare 5×4m con divano 3 posti, madia, finestra e quadri d'autore.
-                </p>
+                <div className="h-24 bg-ink-950 p-2 group-hover:bg-ink-800 transition-colors">
+                  <TemplateThumb id={t.id} />
+                </div>
+                <div className="p-3">
+                  <p className="text-[12.5px] font-semibold text-ink-100">{t.name}</p>
+                  <p className="text-[11px] text-ink-400 mt-1 leading-snug line-clamp-3">{t.description}</p>
+                </div>
               </button>
-
-              <button
-                onClick={() => {
-                  resetToTemplate('l-shaped-gallery');
-                  setProjectModalOpen(false);
-                }}
-                className="p-3.5 rounded-lg border border-neutral-800 hover:border-cyan-500/60 bg-neutral-950/60 hover:bg-neutral-950 text-left transition-all group"
-              >
-                <p className="text-xs font-semibold text-white group-hover:text-cyan-400">
-                  Stanza Irregolare ad "L"
-                </p>
-                <p className="text-[11px] text-neutral-400 mt-1">
-                  Layout poligonale a 6 pareti per galleria d'arte con panca e vetrata a nastro.
-                </p>
-              </button>
-            </div>
+            ))}
           </div>
+        </section>
 
-          {/* Save Current Project */}
-          <div className="bg-neutral-950 border border-neutral-800 rounded-xl p-4 flex flex-col gap-3">
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-300">
-              Salva Progetto Attuale
-            </h3>
-            <div className="flex gap-2">
-              <input
-                type="text"
-                value={newProjectName}
-                onChange={(e) => setNewProjectName(e.target.value)}
-                placeholder="Nome del progetto..."
-                className="flex-1 h-9 px-3 rounded-md bg-neutral-900 border border-neutral-800 text-xs text-white focus:outline-none focus:border-cyan-500 font-sans"
-              />
-              <button
-                onClick={handleSaveCurrent}
-                className="px-4 h-9 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold rounded-md shadow transition-colors flex items-center gap-1.5 shrink-0"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Salva
-              </button>
-            </div>
+        {/* Save */}
+        <section className="flex flex-col gap-3">
+          <h3 className="eyebrow flex items-center gap-2">
+            <Save className="w-3.5 h-3.5" /> Salva una versione
+          </h3>
+          <div className="flex gap-2">
+            <input
+              className="field flex-1 !h-9"
+              value={name}
+              onChange={(e) => setName(e.target.value)}
+              onKeyDown={(e) => e.key === 'Enter' && handleSave()}
+              placeholder="Nome del progetto"
+              aria-label="Nome del progetto"
+            />
+            <button className="btn btn-primary" onClick={() => handleSave()}>
+              <Save className="w-4 h-4" /> Salva
+            </button>
           </div>
+        </section>
 
-          {/* Saved Projects in Browser */}
-          <div>
-            <h3 className="text-xs font-semibold uppercase tracking-wider text-neutral-400 mb-3">
-              Progetti Salvati nel Browser ({savedProjects.length})
-            </h3>
-            {savedProjects.length === 0 ? (
-              <p className="text-xs text-neutral-500 italic py-2">
-                Nessun progetto salvato in locale.
-              </p>
-            ) : (
-              <div className="flex flex-col gap-2 max-h-48 overflow-y-auto">
-                {savedProjects.map((p) => (
-                  <div
-                    key={p.id}
-                    onClick={() => {
-                      loadProject(p);
-                    }}
-                    className="p-3 rounded-lg border border-neutral-800 bg-neutral-950/70 hover:bg-neutral-900 hover:border-neutral-700 flex items-center justify-between cursor-pointer transition-colors"
-                  >
-                    <div>
-                      <p className="text-xs font-semibold text-white">{p.name}</p>
-                      <p className="text-[10px] text-neutral-400 font-mono mt-0.5">
-                        {new Date(p.updatedAt).toLocaleString('it-IT')} · {p.artworks?.length || 0} Quadri · {p.furniture?.length || 0} Mobili
-                      </p>
-                    </div>
-                    <div className="flex items-center gap-2">
-                      <button
-                        onClick={(e) => handleDelete(p.id, e)}
-                        className="w-7 h-7 flex items-center justify-center rounded hover:bg-red-950 text-neutral-400 hover:text-red-400 transition-colors"
-                        title="Elimina"
-                      >
+        {/* Saved list */}
+        <section className="flex flex-col gap-3">
+          <h3 className="eyebrow flex items-center gap-2">
+            <Clock className="w-3.5 h-3.5" /> Salvati nel browser · {saved.length}
+          </h3>
+          {saved.length === 0 ? (
+            <p className="text-[12.5px] text-ink-500">Ancora nessun progetto salvato.</p>
+          ) : (
+            <div className="flex flex-col gap-1.5">
+              {saved.map((p) => (
+                <div key={p.id} className="card px-3.5 py-2.5 flex items-center gap-3">
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[13px] font-semibold text-ink-100 truncate">{p.name}</p>
+                    <p className="text-[11px] text-ink-400">
+                      {new Date(p.updatedAt).toLocaleString('it-IT', { dateStyle: 'medium', timeStyle: 'short' })} · {p.artworks?.length || 0} quadri ·{' '}
+                      {p.furniture?.length || 0} arredi
+                    </p>
+                  </div>
+                  {confirmDelete === p.id ? (
+                    <>
+                      <span className="text-[11.5px] text-ink-300 hidden sm:inline">Eliminare?</span>
+                      <button className="btn btn-danger btn-sm" onClick={() => persist(saved.filter((x) => x.id !== p.id))}>
+                        Elimina
+                      </button>
+                      <button className="btn btn-ghost btn-sm" onClick={() => setConfirmDelete(null)}>
+                        No
+                      </button>
+                    </>
+                  ) : (
+                    <>
+                      <button className="icon-btn" title="Sovrascrivi con lo stato attuale" aria-label={`Sovrascrivi ${p.name}`} onClick={() => handleSave(p.id)}>
+                        <RefreshCw className="w-3.5 h-3.5" />
+                      </button>
+                      <button className="icon-btn hover:!text-danger" title="Elimina" aria-label={`Elimina ${p.name}`} onClick={() => setConfirmDelete(p.id)}>
                         <Trash2 className="w-3.5 h-3.5" />
                       </button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
+                      <button
+                        className="btn btn-secondary btn-sm"
+                        onClick={() => {
+                          if (loadProject(p)) notify(`Progetto “${p.name}” aperto`, 'success');
+                        }}
+                      >
+                        Apri
+                      </button>
+                    </>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </section>
 
-          {/* Export / Import File */}
-          <div className="pt-4 border-t border-neutral-800 flex items-center justify-between gap-3">
-            <input
-              ref={fileInputRef}
-              type="file"
-              accept=".json"
-              onChange={handleImportFile}
-              className="hidden"
-            />
-            <button
-              onClick={() => fileInputRef.current?.click()}
-              className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
-            >
-              <Upload className="w-3.5 h-3.5" />
-              Importa JSON
-            </button>
-
-            <button
-              onClick={handleExportFile}
-              className="flex items-center gap-2 px-3 py-2 text-xs font-medium text-neutral-300 hover:text-white bg-neutral-800 hover:bg-neutral-700 rounded-lg transition-colors"
-            >
-              <Download className="w-3.5 h-3.5" />
-              Esporta Progetto JSON
-            </button>
-          </div>
-        </div>
+        {/* Import / export */}
+        <section className="flex flex-col sm:flex-row gap-2 pt-5 border-t hairline">
+          <input ref={fileInputRef} type="file" accept=".json,application/json" onChange={handleImport} className="hidden" />
+          <button className="btn btn-secondary flex-1" onClick={() => fileInputRef.current?.click()}>
+            <Upload className="w-4 h-4" /> Importa file JSON
+          </button>
+          <button
+            className="btn btn-secondary flex-1"
+            onClick={() => {
+              const json = exportProjectJSON(name);
+              const slug = (name || 'progetto').toLowerCase().replace(/[^a-z0-9]+/g, '-');
+              downloadFile(`artwall-${slug}.json`, new Blob([json], { type: 'application/json' }));
+            }}
+          >
+            <Download className="w-4 h-4" /> Esporta file JSON
+          </button>
+        </section>
       </div>
-    </div>
+    </Modal>
   );
 };

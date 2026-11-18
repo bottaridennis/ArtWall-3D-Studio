@@ -3,8 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React from 'react';
-import { Pipette } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import { Pipette, Check } from 'lucide-react';
 
 interface CustomColorPickerProps {
   label: string;
@@ -13,6 +13,16 @@ interface CustomColorPickerProps {
   presetColors?: { name: string; value: string }[];
   className?: string;
 }
+
+const HEX_RE = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i;
+
+const isLight = (hex: string) => {
+  const h = hex.replace('#', '');
+  const full = h.length === 3 ? h.split('').map((c) => c + c).join('') : h;
+  const n = parseInt(full, 16);
+  const r = (n >> 16) & 255, g = (n >> 8) & 255, b = n & 255;
+  return 0.299 * r + 0.587 * g + 0.114 * b > 160;
+};
 
 export const CustomColorPicker: React.FC<CustomColorPickerProps> = ({
   label,
@@ -32,15 +42,25 @@ export const CustomColorPicker: React.FC<CustomColorPickerProps> = ({
   ],
   className = '',
 }) => {
+  const [text, setText] = useState(value);
+  useEffect(() => setText(value), [value]);
+
+  const commitText = (t: string) => {
+    const v = t.startsWith('#') ? t : `#${t}`;
+    if (HEX_RE.test(v)) onChange(v.toLowerCase());
+    else setText(value);
+  };
+
+  const selectedPreset = presetColors.find((c) => c.value.toLowerCase() === value.toLowerCase());
+
   return (
     <div className={`flex flex-col gap-2 ${className}`}>
-      <div className="flex items-center justify-between text-xs text-neutral-400">
-        <span className="font-medium tracking-wide text-neutral-300">{label}</span>
-        <span className="font-mono text-[11px] uppercase text-neutral-400">{value}</span>
+      <div className="flex items-center justify-between">
+        <span className="field-label">{label}</span>
+        <span className="text-[11px] text-ink-500">{selectedPreset?.name || 'Personalizzato'}</span>
       </div>
 
-      {/* Swatches */}
-      <div className="grid grid-cols-5 gap-1.5">
+      <div className="flex flex-wrap gap-1.5">
         {presetColors.map((col) => {
           const isSelected = value.toLowerCase() === col.value.toLowerCase();
           return (
@@ -49,37 +69,48 @@ export const CustomColorPicker: React.FC<CustomColorPickerProps> = ({
               type="button"
               onClick={() => onChange(col.value)}
               title={col.name}
-              className={`h-6 rounded border transition-all ${
-                isSelected
-                  ? 'border-white scale-105 shadow-sm shadow-white/20 ring-1 ring-white/50'
-                  : 'border-neutral-800 hover:border-neutral-600 hover:scale-102'
+              aria-label={col.name}
+              aria-pressed={isSelected}
+              className={`relative w-7 h-7 rounded-full transition-transform hover:scale-110 ring-offset-2 ring-offset-ink-900 ${
+                isSelected ? 'ring-2 ring-brass-400' : 'ring-1 ring-white/10'
               }`}
               style={{ backgroundColor: col.value }}
-            />
+            >
+              {isSelected && (
+                <Check
+                  className={`absolute inset-0 m-auto w-3.5 h-3.5 ${isLight(col.value) ? 'text-black/70' : 'text-white'}`}
+                />
+              )}
+            </button>
           );
         })}
       </div>
 
-      {/* Custom Color Input row */}
-      <div className="flex items-center gap-2 mt-0.5">
-        <div className="relative flex-1 flex items-center bg-neutral-900 border border-neutral-800 rounded-md px-2 py-1">
-          <input
-            type="text"
-            value={value}
-            onChange={(e) => onChange(e.target.value)}
-            className="w-full bg-transparent font-mono text-xs text-neutral-200 uppercase focus:outline-none"
-            placeholder="#HEX"
-          />
-        </div>
-        <label className="relative flex items-center justify-center w-8 h-8 rounded-md bg-neutral-900 border border-neutral-800 hover:border-neutral-700 cursor-pointer transition-colors overflow-hidden">
-          <Pipette className="w-3.5 h-3.5 text-neutral-400" />
+      <div className="flex items-center gap-2">
+        <label
+          className="relative w-[2.1rem] h-[2.1rem] shrink-0 rounded-[0.55rem] cursor-pointer overflow-hidden ring-1 ring-white/10 flex items-center justify-center"
+          style={{ backgroundColor: HEX_RE.test(value) ? value : '#607274' }}
+          title="Scegli un colore personalizzato"
+        >
+          <Pipette className={`w-3.5 h-3.5 ${HEX_RE.test(value) && isLight(value) ? 'text-black/60' : 'text-white/80'}`} />
           <input
             type="color"
-            value={value.startsWith('#') ? value : '#607274'}
+            value={HEX_RE.test(value) && value.length === 7 ? value : '#607274'}
             onChange={(e) => onChange(e.target.value)}
             className="absolute inset-0 opacity-0 cursor-pointer w-full h-full"
+            aria-label={`${label}: colore personalizzato`}
           />
         </label>
+        <input
+          type="text"
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          onBlur={(e) => commitText(e.target.value)}
+          onKeyDown={(e) => e.key === 'Enter' && commitText(text)}
+          className="field font-mono uppercase"
+          placeholder="#HEX"
+          aria-label={`${label}: codice esadecimale`}
+        />
       </div>
     </div>
   );

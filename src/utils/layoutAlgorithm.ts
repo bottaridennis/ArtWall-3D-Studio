@@ -54,14 +54,15 @@ export function isPlacementValid(
       vMin: obs.vMin - (obs.vMin > 0 ? options.safetyMarginObstacles : 0),
       vMax: obs.vMax + options.safetyMarginObstacles,
     };
-    if (checkAABBCollision(box, obsBox)) {
+    // Touching the safety margin is allowed (tolerance avoids float/equality rejects)
+    if (checkAABBCollision(box, obsBox, -0.5)) {
       return false;
     }
   }
 
   // Check collision with other artworks in the same layout
   for (const other of otherBoxes) {
-    if (checkAABBCollision(box, other, options.interArtSpacing / 2)) {
+    if (checkAABBCollision(box, other, options.interArtSpacing / 2 - 0.5)) {
       return false;
     }
   }
@@ -73,10 +74,14 @@ export function isPlacementValid(
  * Build rich candidate artworks pool from user artworks + curated museum collection
  */
 function getArtworksPool(artworks: Artwork[], wallId: string): Artwork[] {
-  const pool: Artwork[] = [...(artworks || [])];
+  // Priority: artworks already on this wall, then artworks from other walls,
+  // finally the curated collection to fill the gaps.
+  const onWall = (artworks || []).filter((a) => a.wallId === wallId);
+  const others = (artworks || []).filter((a) => a.wallId !== wallId);
+  const pool: Artwork[] = [...onWall, ...others];
 
   for (const preset of CURATED_ARTWORKS) {
-    if (pool.length >= 10) break;
+    if (pool.length >= 8) break;
     if (!pool.some((a) => a.imageUrl === preset.url)) {
       pool.push({
         id: `art-pool-${preset.id}`,
@@ -507,6 +512,7 @@ export function generateLayoutProposals(
   // -------------------------------------------------------------
   // 3.1 2x2 Grid (4 artworks)
   const grid4 = pool.slice(0, 4);
+  if (grid4.length < 4) return proposals;
   const dims4 = grid4.map((a) => getArtworkTotalDimensions(a));
   const col1W = Math.max(dims4[0].totalWidth, dims4[2]?.totalWidth || dims4[0].totalWidth);
   const col2W = Math.max(dims4[1].totalWidth, dims4[3]?.totalWidth || dims4[1].totalWidth);

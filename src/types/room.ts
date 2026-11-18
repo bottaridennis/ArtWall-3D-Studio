@@ -17,8 +17,12 @@ export interface Wall {
   p2: Point2D;
   length: number; // cm
   height: number; // cm
-  normal: Point2D; // outward facing normal
-  angle: number; // radians
+  normal: Point2D; // inward facing normal (points inside the room)
+  angle: number; // radians (direction p1 -> p2)
+  /** Origin of the "u" axis: the left corner as seen from inside the room */
+  uOrigin: Point2D;
+  /** Unit vector of the "u" axis (left -> right as seen from inside) */
+  uDir: Point2D;
 }
 
 export type RoomShapeType = 'rectangular' | 'polygon';
@@ -93,6 +97,8 @@ export interface Artwork {
 }
 
 export type ViewMode = '3d' | '2d_plan' | '2d_wall';
+
+export type CameraPreset = 'perspective' | 'top' | 'wall';
 
 export type SelectableType = 'furniture' | 'artwork' | 'door' | 'window' | 'wall' | 'vertex' | null;
 

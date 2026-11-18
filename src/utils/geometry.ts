@@ -66,12 +66,28 @@ export function isClockwise(vertices: Point2D[]): boolean {
 }
 
 /**
- * Compute walls with direction, length and normals from room vertices
+ * Signed area (cm²). Positive when vertices are ordered so that the interior
+ * lies on the left of each edge in the (x, y) plane used by the floor plan.
+ */
+export function signedArea(vertices: Point2D[]): number {
+  let a = 0;
+  for (let i = 0; i < vertices.length; i++) {
+    const j = (i + 1) % vertices.length;
+    a += vertices[i].x * vertices[j].y - vertices[j].x * vertices[i].y;
+  }
+  return a / 2;
+}
+
+/**
+ * Compute walls with direction, length, inward normals and a "u" axis that always
+ * runs left -> right for a viewer standing inside the room and facing the wall.
+ * Works for both clockwise and counter-clockwise vertex orders.
  */
 export function computeWallsFromVertices(vertices: Point2D[], height: number): Wall[] {
   if (vertices.length < 2) return [];
   const walls: Wall[] = [];
   const n = vertices.length;
+  const positive = signedArea(vertices) >= 0;
 
   for (let i = 0; i < n; i++) {
     const p1 = vertices[i];
@@ -83,13 +99,9 @@ export function computeWallsFromVertices(vertices: Point2D[], height: number): W
 
     if (length <= 0.001) continue;
 
-    // Normal pointing outward
-    const normal = {
-      x: -dy / length,
-      y: dx / length,
-    };
-
-    const angle = Math.atan2(dy, dx);
+    const tx = dx / length;
+    const ty = dy / length;
+    const normal = positive ? { x: -ty, y: tx } : { x: ty, y: -tx };
 
     walls.push({
       id: `wall-${i}`,
@@ -101,11 +113,57 @@ export function computeWallsFromVertices(vertices: Point2D[], height: number): W
       length,
       height,
       normal,
-      angle,
+      angle: Math.atan2(dy, dx),
+      uOrigin: positive ? p1 : p2,
+      uDir: positive ? { x: tx, y: ty } : { x: -tx, y: -ty },
     });
   }
 
   return walls;
+}
+
+/** Floor-plan point (cm) of a coordinate u along the wall, offset inward by `inset` cm */
+export function wallPointAt(wall: Wall, u: number, inset = 0): Point2D {
+  return {
+    x: wall.uOrigin.x + wall.uDir.x * u + wall.normal.x * inset,
+    y: wall.uOrigin.y + wall.uDir.y * u + wall.normal.y * inset,
+  };
+}
+
+/** Project a floor-plan point onto a wall: returns u along wall and inward distance */
+export function projectPointOnWall(wall: Wall, p: Point2D): { u: number; dist: number } {
+  const rx = p.x - wall.uOrigin.x;
+  const ry = p.y - wall.uOrigin.y;
+  return {
+    u: rx * wall.uDir.x + ry * wall.uDir.y,
+    dist: rx * wall.normal.x + ry * wall.normal.y,
+  };
+}
+
+/** Bounding box of a vertex list */
+export function getBounds(vertices: Point2D[]) {
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const v of vertices) {
+    minX = Math.min(minX, v.x);
+    maxX = Math.max(maxX, v.x);
+    minY = Math.min(minY, v.y);
+    maxY = Math.max(maxY, v.y);
+  }
+  if (!isFinite(minX)) return { minX: 0, maxX: 0, minY: 0, maxY: 0 };
+  return { minX, maxX, minY, maxY };
+}
+
+/** Point-in-polygon test (ray casting) */
+export function isPointInPolygon(p: Point2D, vertices: Point2D[]): boolean {
+  let inside = false;
+  for (let i = 0, j = vertices.length - 1; i < vertices.length; j = i++) {
+    const a = vertices[i];
+    const b = vertices[j];
+    if (a.y > p.y !== b.y > p.y && p.x < ((b.x - a.x) * (p.y - a.y)) / (b.y - a.y) + a.x) {
+      inside = !inside;
+    }
+  }
+  return inside;
 }
 
 /**
@@ -143,43 +201,24 @@ export function projectFurnitureOntoWall(
   maxWallDistanceCm = 70
 ): ProjectedObstacle | null {
   const corners = getFurnitureFloorCorners(furniture);
-  const { p1, p2, length } = wall;
-
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  const wallLen = Math.sqrt(dx * dx + dy * dy);
-  if (wallLen < 1) return null;
-
-  const ux = dx / wallLen;
-  const uy = dy / wallLen;
-
-  // Normal to wall line
-  const nx = -uy;
-  const ny = ux;
+  if (wall.length < 1) return null;
 
   let minU = Infinity;
   let maxU = -Infinity;
-  let minPerpDist = Infinity;
+  let minDist = Infinity;
 
   for (const c of corners) {
-    const rx = c.x - p1.x;
-    const ry = c.y - p1.y;
-
-    const uProj = rx * ux + ry * uy;
-    const perpDist = Math.abs(rx * nx + ry * ny);
-
-    if (uProj < minU) minU = uProj;
-    if (uProj > maxU) maxU = uProj;
-    if (perpDist < minPerpDist) minPerpDist = perpDist;
+    const { u, dist } = projectPointOnWall(wall, c);
+    minU = Math.min(minU, u);
+    maxU = Math.max(maxU, u);
+    minDist = Math.min(minDist, dist);
   }
 
-  // Check if furniture is close enough to this wall
-  if (minPerpDist > maxWallDistanceCm) return null;
+  // Furniture must stand in front of the wall (inside the room) and close enough
+  if (minDist > maxWallDistanceCm || minDist < -20) return null;
 
-  // Check if projections overlap with the wall's segment [0, length]
   const clampedMinU = Math.max(0, minU);
-  const clampedMaxU = Math.min(length, maxU);
-
+  const clampedMaxU = Math.min(wall.length, maxU);
   if (clampedMaxU - clampedMinU < 5) return null;
 
   return {
@@ -188,10 +227,10 @@ export function projectFurnitureOntoWall(
     name: furniture.name,
     uMin: clampedMinU,
     uMax: clampedMaxU,
-    vMin: 0,
-    vMax: furniture.height,
+    vMin: furniture.position.y,
+    vMax: furniture.position.y + furniture.height,
     color: furniture.color,
-    depthDistance: minPerpDist,
+    depthDistance: Math.max(0, minDist),
   };
 }
 
@@ -278,7 +317,9 @@ export function checkAABBCollision(
 }
 
 /**
- * Convert (u, v) wall coordinate to 3D world space (Three.js coordinates: X, Y, Z)
+ * Convert (u, v) wall coordinate to 3D world space (Three.js coordinates in meters).
+ * The returned rotation makes an object's local +Z face into the room and its local +X
+ * follow the u axis.
  */
 export function wallCoordsTo3D(
   wall: Wall,
@@ -286,36 +327,14 @@ export function wallCoordsTo3D(
   v: number,
   surfaceOffsetCm = 7.6 // half wall thickness (7.5cm) + 1mm clearance
 ): { x: number; y: number; z: number; rotationY: number } {
-  const { p1, p2, length } = wall;
-
-  const dx = p2.x - p1.x;
-  const dy = p2.y - p1.y;
-  const len = Math.sqrt(dx * dx + dy * dy);
-
-  // Inward normal (pointing inside the room)
-  // Wall vector: (ux, uz)
-  const ux = dx / len;
-  const uz = dy / len;
-
-  // For typical room polygon: inner normal is (-uz, ux) or (uz, -ux)
-  // Since Three.js Y is up, X and Z are floor plane:
-  const inNx = -uz;
-  const inNz = ux;
-
-  const posX = p1.x + ux * u + inNx * surfaceOffsetCm;
-  const posZ = p1.y + uz * u + inNz * surfaceOffsetCm;
-  const posY = v;
-
-  // Wall angle in 3D around Y axis
-  // In Three.js, rotation around Y of an object whose width is along local X
-  // is -atan2(dy, dx) to match the wall segment direction (dx, dy).
-  const angle = Math.atan2(dy, dx);
-  const rotY = -angle;
-
+  const p = wallPointAt(wall, u, surfaceOffsetCm);
   return {
-    x: cmToM(posX),
-    y: cmToM(posY),
-    z: cmToM(posZ),
-    rotationY: rotY,
+    x: cmToM(p.x),
+    y: cmToM(v),
+    z: cmToM(p.y),
+    rotationY: -Math.atan2(wall.uDir.y, wall.uDir.x),
   };
 }
+
+/** Clamp helper */
+export const clamp = (v: number, min: number, max: number) => Math.min(max, Math.max(min, v));
