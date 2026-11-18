@@ -1,0 +1,6 @@
+{
+  "name": "ArtWall 3D Studio",
+  "description": "Progettazione di stanze 3D, editor di pareti e disposizione geometrica automatica di quadri e gallerie d'arte.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
