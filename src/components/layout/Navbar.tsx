@@ -8,158 +8,144 @@ import { useRoomStore } from '../../store/useRoomStore';
 import { ViewMode } from '../../types/room';
 import {
   Box,
-  Compass,
-  Maximize,
+  Frame,
+  LayoutGrid,
   Sparkles,
-  Folder,
+  FolderOpen,
   Plus,
-  Eye,
-  Grid,
-  Magnet,
-  Camera,
-  Layers,
-  Palette,
+  Undo2,
+  Redo2,
+  HelpCircle,
+  PanelLeft,
+  SlidersHorizontal,
+  ClipboardList,
 } from 'lucide-react';
 
+const VIEWS: { id: ViewMode; label: string; short: string; icon: React.ElementType; key: string }[] = [
+  { id: '3d', label: 'Vista 3D', short: '3D', icon: Box, key: '1' },
+  { id: '2d_wall', label: 'Parete', short: 'Parete', icon: Frame, key: '2' },
+  { id: '2d_plan', label: 'Pianta', short: 'Pianta', icon: LayoutGrid, key: '3' },
+];
+
+export const Logo: React.FC<{ className?: string }> = ({ className = 'w-8 h-8' }) => (
+  <svg viewBox="0 0 64 64" className={className} aria-hidden="true">
+    <rect width="64" height="64" rx="14" fill="#1c1c21" />
+    <rect x="12" y="14" width="40" height="30" rx="2" fill="none" stroke="#e3b866" strokeWidth="4" />
+    <rect x="19" y="21" width="26" height="16" fill="#e3b866" opacity=".35" />
+    <path d="M8 52h48" stroke="#e3b866" strokeWidth="4" strokeLinecap="round" />
+  </svg>
+);
+
 export const Navbar: React.FC = () => {
+  const viewMode = useRoomStore((s) => s.viewMode);
+  const canUndo = useRoomStore((s) => s.past.length > 0);
+  const canRedo = useRoomStore((s) => s.future.length > 0);
+  const leftPanelOpen = useRoomStore((s) => s.leftPanelOpen);
+  const rightPanelOpen = useRoomStore((s) => s.rightPanelOpen);
+  const hasSelection = useRoomStore((s) => !!s.selectedId);
   const {
-    viewMode,
-    showDimensions,
-    showGrid,
-    snapToGrid,
     setViewMode,
-    toggleDimensions,
-    toggleGrid,
-    toggleSnapToGrid,
-    resetCamera,
+    undo,
+    redo,
     setLayoutModalOpen,
     setAddArtworkModalOpen,
     setProjectModalOpen,
-  } = useRoomStore();
+    setHelpModalOpen,
+    setGuideModalOpen,
+    setLeftPanelOpen,
+    setRightPanelOpen,
+  } = useRoomStore.getState();
 
   return (
-    <header className="h-14 px-4 bg-neutral-900 border-b border-neutral-800 flex items-center justify-between shrink-0 select-none z-20">
-      {/* Brand */}
-      <div className="flex items-center gap-3">
-        <div className="w-8 h-8 rounded-lg bg-cyan-600 flex items-center justify-center text-white shadow-md shadow-cyan-900/50">
-          <Layers className="w-4 h-4" />
-        </div>
-        <div>
-          <h1 className="text-sm font-bold tracking-tight text-white flex items-center gap-2">
-            ArtWall <span className="text-cyan-400 font-mono text-xs font-semibold">3D</span>
+    <header className="h-14 px-2 sm:px-3 panel border-b flex items-center gap-2 shrink-0 z-30 relative">
+      {/* Left: drawer toggle + brand */}
+      <div className="flex items-center gap-1.5 sm:gap-2.5 min-w-0 flex-1">
+        <button
+          className="icon-btn lg:hidden"
+          data-active={leftPanelOpen}
+          onClick={() => setLeftPanelOpen(!leftPanelOpen)}
+          aria-label="Apri libreria"
+        >
+          <PanelLeft className="w-4.5 h-4.5" />
+        </button>
+        <Logo className="w-8 h-8 shrink-0 hidden sm:block" />
+        <div className="leading-none min-w-0 hidden sm:block">
+          <h1 className="display text-[22px] text-ink-100 leading-none">
+            ArtWall <span className="italic text-brass-400">Studio</span>
           </h1>
-          <p className="text-[10px] text-neutral-400 hidden sm:block">
-            Progettazione Stanze & Disposizione Quadri
-          </p>
+          <p className="text-[10.5px] text-ink-400 mt-1 hidden xl:block">Progetta pareti, appendi arte</p>
         </div>
       </div>
 
-      {/* View Mode Segmented Controls */}
-      <div className="flex items-center p-1 bg-neutral-950 border border-neutral-800 rounded-lg">
-        <button
-          onClick={() => setViewMode('3d')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-            viewMode === '3d'
-              ? 'bg-neutral-800 text-white shadow-sm border border-neutral-700'
-              : 'text-neutral-400 hover:text-white'
-          }`}
-          title="Vista 3D Orbitale"
-        >
-          <Box className="w-3.5 h-3.5 text-cyan-400" />
-          <span>3D Orbit</span>
-        </button>
-
-        <button
-          onClick={() => setViewMode('2d_wall')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-            viewMode === '2d_wall'
-              ? 'bg-neutral-800 text-white shadow-sm border border-neutral-700'
-              : 'text-neutral-400 hover:text-white'
-          }`}
-          title="Modalità Parete 2D Frontale"
-        >
-          <Compass className="w-3.5 h-3.5 text-amber-400" />
-          <span>Parete 2D Frontale</span>
-        </button>
-
-        <button
-          onClick={() => setViewMode('2d_plan')}
-          className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-all ${
-            viewMode === '2d_plan'
-              ? 'bg-neutral-800 text-white shadow-sm border border-neutral-700'
-              : 'text-neutral-400 hover:text-white'
-          }`}
-          title="Editor Pianta Stanza 2D"
-        >
-          <Maximize className="w-3.5 h-3.5 text-emerald-400" />
-          <span>Pianta 2D</span>
-        </button>
-      </div>
-
-      {/* Viewport Toggles & Actions */}
-      <div className="flex items-center gap-2">
-        {/* Toggle Controls */}
-        <div className="hidden md:flex items-center gap-1 bg-neutral-950 p-1 border border-neutral-800 rounded-lg">
+      {/* Center: view switch */}
+      <nav className="seg shrink-0" aria-label="Modalità di visualizzazione">
+        {VIEWS.map((v) => (
           <button
-            onClick={resetCamera}
-            title="Ripristina Vista Telecamera"
-            className="p-1.5 text-neutral-400 hover:text-white hover:bg-neutral-850 rounded transition-colors"
+            key={v.id}
+            data-active={viewMode === v.id}
+            onClick={() => setViewMode(v.id)}
+            className="seg-item"
+            title={`${v.label} (${v.key})`}
           >
-            <Camera className="w-3.5 h-3.5" />
+            <v.icon className="w-3.5 h-3.5" />
+            <span className="hidden md:inline">{v.label}</span>
+            <span className="md:hidden hidden min-[400px]:inline">{v.short}</span>
           </button>
-          <button
-            onClick={toggleDimensions}
-            title={showDimensions ? 'Nascondi Quote' : 'Mostra Quote'}
-            className={`p-1.5 rounded transition-colors ${
-              showDimensions ? 'text-cyan-400 bg-neutral-800' : 'text-neutral-500 hover:text-white'
-            }`}
-          >
-            <Eye className="w-3.5 h-3.5" />
+        ))}
+      </nav>
+
+      {/* Right: actions */}
+      <div className="flex items-center justify-end gap-1 sm:gap-1.5 flex-1 min-w-0">
+        <div className="flex items-center">
+          <button className="icon-btn" onClick={undo} disabled={!canUndo} title="Annulla (Ctrl+Z)" aria-label="Annulla">
+            <Undo2 className="w-4 h-4" />
           </button>
-          <button
-            onClick={toggleGrid}
-            title={showGrid ? 'Nascondi Griglia' : 'Mostra Griglia'}
-            className={`p-1.5 rounded transition-colors ${
-              showGrid ? 'text-cyan-400 bg-neutral-800' : 'text-neutral-500 hover:text-white'
-            }`}
-          >
-            <Grid className="w-3.5 h-3.5" />
-          </button>
-          <button
-            onClick={toggleSnapToGrid}
-            title={snapToGrid ? 'Magnetismo Griglia Attivo' : 'Magnetismo Griglia Disattivo'}
-            className={`p-1.5 rounded transition-colors ${
-              snapToGrid ? 'text-cyan-400 bg-neutral-800' : 'text-neutral-500 hover:text-white'
-            }`}
-          >
-            <Magnet className="w-3.5 h-3.5" />
+          <button className="icon-btn hidden min-[420px]:inline-flex" onClick={redo} disabled={!canRedo} title="Ripeti (Ctrl+Shift+Z)" aria-label="Ripeti">
+            <Redo2 className="w-4 h-4" />
           </button>
         </div>
-
-        {/* Primary Action Buttons */}
+        <div className="hidden md:block w-px h-5 bg-white/8 mx-1" />
         <button
-          onClick={() => setAddArtworkModalOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white text-xs font-semibold rounded-md border border-neutral-700 transition-colors shadow-sm"
+          className="icon-btn hidden md:inline-flex"
+          onClick={() => setGuideModalOpen(true)}
+          title="Guida di montaggio"
+          aria-label="Guida di montaggio"
         >
-          <Plus className="w-3.5 h-3.5 text-cyan-400" />
-          <span>+ Quadro</span>
+          <ClipboardList className="w-4 h-4" />
         </button>
-
+        <button className="icon-btn hidden md:inline-flex" onClick={() => setHelpModalOpen(true)} title="Aiuto e scorciatoie (?)" aria-label="Aiuto">
+          <HelpCircle className="w-4 h-4" />
+        </button>
+        <button className="btn btn-ghost btn-sm hidden xl:inline-flex" onClick={() => setProjectModalOpen(true)}>
+          <FolderOpen className="w-4 h-4" />
+          Progetti
+        </button>
+        <button className="icon-btn xl:hidden" onClick={() => setProjectModalOpen(true)} title="Progetti" aria-label="Progetti">
+          <FolderOpen className="w-4 h-4" />
+        </button>
+        <button className="btn btn-secondary btn-sm hidden lg:inline-flex" onClick={() => setAddArtworkModalOpen(true)}>
+          <Plus className="w-3.5 h-3.5" />
+          Quadro
+        </button>
         <button
+          className="btn btn-primary btn-sm hidden sm:inline-flex"
           onClick={() => setLayoutModalOpen(true)}
-          className="flex items-center gap-1.5 px-3 py-1.5 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold rounded-md shadow-md shadow-cyan-950 transition-colors"
+          title="Disposizione automatica (L)"
         >
           <Sparkles className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">Disposizione Automatica</span>
-          <span className="sm:hidden">Auto Layout</span>
+          <span className="hidden lg:inline">Disposizione automatica</span>
+          <span className="lg:hidden">Auto</span>
         </button>
-
         <button
-          onClick={() => setProjectModalOpen(true)}
-          className="p-2 text-neutral-400 hover:text-white hover:bg-neutral-800 rounded-md border border-neutral-800 transition-colors"
-          title="Gestione Progetti"
+          className="icon-btn lg:hidden relative"
+          data-active={rightPanelOpen}
+          onClick={() => setRightPanelOpen(!rightPanelOpen)}
+          aria-label="Apri proprietà"
         >
-          <Folder className="w-4 h-4" />
+          <SlidersHorizontal className="w-4 h-4" />
+          {hasSelection && !rightPanelOpen && (
+            <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 rounded-full bg-brass-400" />
+          )}
         </button>
       </div>
     </header>

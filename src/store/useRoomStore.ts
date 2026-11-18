@@ -16,27 +16,34 @@ import {
   Point2D,
   LayoutProposal,
   ProjectData,
+  CameraPreset,
 } from '../types/room';
 import {
   createRectangleVertices,
   computeWallsFromVertices,
   getArtworkTotalDimensions,
+  getBounds,
+  projectPointOnWall,
+  wallPointAt,
 } from '../utils/geometry';
 import { LayoutOptions } from '../utils/layoutAlgorithm';
-import { CURATED_ARTWORKS, FURNITURE_PRESETS } from '../constants/presets';
+import { ROOM_TEMPLATES, SceneData } from '../constants/templates';
 
-interface RoomStoreState {
-  room: RoomConfig;
-  doors: Door[];
-  windows: Window[];
-  furniture: Furniture[];
-  artworks: Artwork[];
+const AUTOSAVE_KEY = 'artwall_autosave_v1';
+const HISTORY_LIMIT = 80;
 
+export type ToastTone = 'info' | 'success' | 'error';
+export interface Toast {
+  id: number;
+  message: string;
+  tone: ToastTone;
+}
+
+interface RoomStoreState extends SceneData {
   // Selection
   selectedId: string | null;
   selectedType: SelectableType;
   selectedVertexIndex: number | null;
-  activeWallId: string;
 
   // Viewport Settings
   viewMode: ViewMode;
@@ -45,12 +52,25 @@ interface RoomStoreState {
   snapToGrid: boolean;
   gridSize: number; // cm
   cameraResetKey: number;
+  cameraPreset: CameraPreset;
+  screenshotKey: number;
 
-  // Layout Generation
+  // Panels & dialogs
   layoutModalOpen: boolean;
   addArtworkModalOpen: boolean;
   projectModalOpen: boolean;
+  helpModalOpen: boolean;
+  guideModalOpen: boolean;
+  leftPanelOpen: boolean;
+  rightPanelOpen: boolean;
   layoutOptions: LayoutOptions;
+
+  // History
+  past: SceneData[];
+  future: SceneData[];
+
+  // Toasts
+  toasts: Toast[];
 
   // Computed helper
   getWalls: () => Wall[];
@@ -59,7 +79,6 @@ interface RoomStoreState {
   setRoomDimensions: (width: number, length: number, height: number) => void;
   setRoomHeight: (height: number) => void;
   setRoomShapeType: (shapeType: 'rectangular' | 'polygon') => void;
-  setVertices: (vertices: Point2D[]) => void;
   updateVertex: (index: number, point: Point2D) => void;
   addVertex: (point: Point2D, afterIndex: number) => void;
   removeVertex: (index: number) => void;
@@ -74,10 +93,15 @@ interface RoomStoreState {
   toggleDimensions: () => void;
   toggleGrid: () => void;
   toggleSnapToGrid: () => void;
-  resetCamera: () => void;
+  resetCamera: (preset?: CameraPreset) => void;
+  requestScreenshot: () => void;
   setLayoutModalOpen: (open: boolean) => void;
   setAddArtworkModalOpen: (open: boolean) => void;
   setProjectModalOpen: (open: boolean) => void;
+  setHelpModalOpen: (open: boolean) => void;
+  setGuideModalOpen: (open: boolean) => void;
+  setLeftPanelOpen: (open: boolean) => void;
+  setRightPanelOpen: (open: boolean) => void;
   setLayoutOptions: (options: Partial<LayoutOptions>) => void;
 
   // Actions: Furniture
@@ -101,146 +125,152 @@ interface RoomStoreState {
   updateWindow: (id: string, partial: Partial<Window>) => void;
   removeWindow: (id: string) => void;
 
+  // Generic helpers on the current selection
+  deleteSelected: () => void;
+  duplicateSelected: () => void;
+  nudgeSelected: (dx: number, dy: number) => void;
+
   // Actions: Layout & Proposals
   applyProposal: (proposal: LayoutProposal) => void;
 
   // Actions: Project Management
-  loadProject: (project: ProjectData) => void;
+  loadProject: (project: Partial<ProjectData>) => boolean;
   resetToTemplate: (templateId: string) => void;
-  exportProjectJSON: () => string;
+  exportProjectJSON: (name?: string) => string;
+
+  // History
+  undo: () => void;
+  redo: () => void;
+
+  // Toasts
+  notify: (message: string, tone?: ToastTone) => void;
+  dismissToast: (id: number) => void;
 }
 
-// Initial default room setup (5m x 4m, 2.8m high)
-const DEFAULT_WIDTH = 500;
-const DEFAULT_LENGTH = 400;
-const DEFAULT_HEIGHT = 280;
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
 
-const initialVertices = createRectangleVertices(DEFAULT_WIDTH, DEFAULT_LENGTH);
+const uid = (prefix: string) =>
+  `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 7)}`;
 
-const initialRoom: RoomConfig = {
-  shapeType: 'rectangular',
-  width: DEFAULT_WIDTH,
-  length: DEFAULT_LENGTH,
-  height: DEFAULT_HEIGHT,
-  vertices: initialVertices,
-  wallColor: '#f5f5f0',
-  floorColor: '#bfa07d',
-  floorMaterial: 'wood',
-};
+const sceneOf = (s: SceneData): SceneData => ({
+  room: s.room,
+  doors: s.doors,
+  windows: s.windows,
+  furniture: s.furniture,
+  artworks: s.artworks,
+  activeWallId: s.activeWallId,
+});
 
-// Initial default furniture
-const initialFurniture: Furniture[] = [
-  {
-    id: 'furn-sofa-1',
-    name: 'Divano 3 Posti',
-    width: 230,
-    height: 85,
-    depth: 95,
-    position: { x: 250, y: 0, z: 50 },
-    rotationY: 0,
-    color: '#607274',
-  },
-  {
-    id: 'furn-sideboard-1',
-    name: 'Madia Rovere',
-    width: 180,
-    height: 75,
-    depth: 45,
-    position: { x: 475, y: 0, z: 200 },
-    rotationY: 90,
-    color: '#b08968',
-  },
-];
+const sceneChanged = (a: SceneData, b: SceneData) =>
+  a.room !== b.room ||
+  a.doors !== b.doors ||
+  a.windows !== b.windows ||
+  a.furniture !== b.furniture ||
+  a.artworks !== b.artworks;
 
-// Initial default door and window
-const initialDoors: Door[] = [
-  {
-    id: 'door-1',
-    name: 'Porta d’Ingresso',
-    wallId: 'wall-2', // North / Back wall
-    u: 80,
-    width: 90,
-    height: 215,
-    elevationY: 0,
-    frameColor: '#3f3f46',
-  },
-];
-
-const initialWindows: Window[] = [
-  {
-    id: 'win-1',
-    name: 'Finestra Panoramica',
-    wallId: 'wall-3', // West / Left wall
-    u: 140,
-    width: 130,
-    height: 140,
-    elevationY: 90,
-    frameColor: '#3f3f46',
-  },
-];
-
-// Initial default artworks hung over the sofa on wall-0
-const initialArtworks: Artwork[] = [
-  {
-    id: 'art-1',
-    name: CURATED_ARTWORKS[0].title,
-    imageUrl: CURATED_ARTWORKS[0].url,
-    wallId: 'wall-0',
-    u: 175,
-    elevationY: 120,
-    width: 90,
-    height: 65,
-    frame: {
-      enabled: true,
-      width: 3,
-      depth: 3,
-      color: '#18181b',
-      matWidth: 4,
-      matColor: '#ffffff',
+/** Validate & normalise an arbitrary object into a SceneData (or null if unusable) */
+export function normalizeScene(raw: any): SceneData | null {
+  if (!raw || typeof raw !== 'object' || !raw.room) return null;
+  const room = raw.room as RoomConfig;
+  const vertices: Point2D[] = Array.isArray(room.vertices) && room.vertices.length >= 3
+    ? room.vertices.map((v: any) => ({ x: Number(v.x) || 0, y: Number(v.y) || 0 }))
+    : createRectangleVertices(Number(room.width) || 500, Number(room.length) || 400);
+  const b = getBounds(vertices);
+  return {
+    room: {
+      shapeType: room.shapeType === 'polygon' ? 'polygon' : 'rectangular',
+      width: Number(room.width) || b.maxX - b.minX,
+      length: Number(room.length) || b.maxY - b.minY,
+      height: Number(room.height) || 280,
+      vertices,
+      wallColor: room.wallColor || '#f5f5f0',
+      floorColor: room.floorColor || '#bfa07d',
+      floorMaterial: room.floorMaterial || 'wood',
     },
-  },
-  {
-    id: 'art-2',
-    name: CURATED_ARTWORKS[2].title,
-    imageUrl: CURATED_ARTWORKS[2].url,
-    wallId: 'wall-0',
-    u: 285,
-    elevationY: 120,
-    width: 70,
-    height: 90,
-    frame: {
-      enabled: true,
-      width: 2.5,
-      depth: 3,
-      color: '#18181b',
-      matWidth: 3,
-      matColor: '#ffffff',
-    },
-  },
-];
+    doors: Array.isArray(raw.doors) ? raw.doors : [],
+    windows: Array.isArray(raw.windows) ? raw.windows : [],
+    furniture: Array.isArray(raw.furniture) ? raw.furniture : [],
+    artworks: Array.isArray(raw.artworks) ? raw.artworks : [],
+    activeWallId: raw.activeWallId || 'wall-0',
+  };
+}
+
+/**
+ * When the number/order of walls changes (vertex added/removed, shape reset),
+ * wall ids (index based) shift. Re-attach every wall-mounted item to the new
+ * wall that is geometrically closest to where it was hanging.
+ */
+function remapWallItems(
+  oldWalls: Wall[],
+  newWalls: Wall[],
+  scene: Pick<SceneData, 'artworks' | 'doors' | 'windows'>
+) {
+  const relocate = <T extends { wallId: string; u: number }>(item: T, width: number): T => {
+    const oldWall = oldWalls.find((w) => w.id === item.wallId);
+    if (!oldWall || newWalls.length === 0) return item;
+    const center = wallPointAt(oldWall, item.u + width / 2);
+    let best: { wall: Wall; u: number; score: number } | null = null;
+    for (const w of newWalls) {
+      const { u, dist } = projectPointOnWall(w, center);
+      const outside = u < 0 ? -u : u > w.length ? u - w.length : 0;
+      const score = Math.abs(dist) + outside * 2;
+      if (!best || score < best.score) best = { wall: w, u, score };
+    }
+    if (!best) return item;
+    const newU = Math.max(0, Math.min(best.wall.length - width, best.u - width / 2));
+    return { ...item, wallId: best.wall.id, u: Math.round(newU * 10) / 10 };
+  };
+
+  return {
+    artworks: scene.artworks.map((a) => relocate(a, getArtworkTotalDimensions(a).totalWidth)),
+    doors: scene.doors.map((d) => relocate(d, d.width)),
+    windows: scene.windows.map((w) => relocate(w, w.width)),
+  };
+}
+
+function loadAutosave(): SceneData | null {
+  try {
+    const raw = localStorage.getItem(AUTOSAVE_KEY);
+    if (!raw) return null;
+    return normalizeScene(JSON.parse(raw));
+  } catch {
+    return null;
+  }
+}
+
+const initialScene: SceneData = loadAutosave() || ROOM_TEMPLATES[0].build();
+
+let toastCounter = 0;
+
+/* ------------------------------------------------------------------ */
+/* Store                                                               */
+/* ------------------------------------------------------------------ */
 
 export const useRoomStore = create<RoomStoreState>((set, get) => ({
-  room: initialRoom,
-  doors: initialDoors,
-  windows: initialWindows,
-  furniture: initialFurniture,
-  artworks: initialArtworks,
+  ...initialScene,
 
   selectedId: null,
   selectedType: null,
   selectedVertexIndex: null,
-  activeWallId: 'wall-0',
 
   viewMode: '3d',
   showDimensions: true,
   showGrid: true,
   snapToGrid: true,
-  gridSize: 10,
+  gridSize: 5,
   cameraResetKey: 0,
+  cameraPreset: 'perspective',
+  screenshotKey: 0,
 
   layoutModalOpen: false,
   addArtworkModalOpen: false,
   projectModalOpen: false,
+  helpModalOpen: false,
+  guideModalOpen: false,
+  leftPanelOpen: false,
+  rightPanelOpen: false,
   layoutOptions: {
     safetyMarginObstacles: 15,
     safetyMarginCeiling: 25,
@@ -249,13 +279,18 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
     targetEyeLevel: 150,
   },
 
+  past: [],
+  future: [],
+  toasts: [],
+
   getWalls: () => {
     const { room } = get();
     return computeWallsFromVertices(room.vertices, room.height);
   },
 
+  /* ----------------------------- Room ----------------------------- */
+
   setRoomDimensions: (width, length, height) => {
-    const newVertices = createRectangleVertices(width, length);
     set((state) => ({
       room: {
         ...state.room,
@@ -263,162 +298,143 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
         length,
         height,
         shapeType: 'rectangular',
-        vertices: newVertices,
+        vertices: createRectangleVertices(width, length),
       },
     }));
   },
 
   setRoomHeight: (height) => {
-    set((state) => ({
-      room: {
-        ...state.room,
-        height,
-      },
-    }));
+    set((state) => ({ room: { ...state.room, height } }));
   },
 
   setRoomShapeType: (shapeType) => {
-    set((state) => ({
-      room: {
-        ...state.room,
-        shapeType,
-      },
+    const state = get();
+    if (shapeType === state.room.shapeType) return;
+    if (shapeType === 'polygon') {
+      set({ room: { ...state.room, shapeType } });
+      return;
+    }
+    // Back to rectangle: use the bounding box of the current polygon
+    const b = getBounds(state.room.vertices);
+    const width = Math.max(100, Math.round(b.maxX - b.minX));
+    const length = Math.max(100, Math.round(b.maxY - b.minY));
+    const vertices = createRectangleVertices(width, length).map((v) => ({
+      x: v.x + b.minX,
+      y: v.y + b.minY,
     }));
-  },
-
-  setVertices: (vertices) => {
-    set((state) => ({
-      room: {
-        ...state.room,
-        vertices,
-        shapeType: 'polygon',
-      },
-    }));
+    const oldWalls = state.getWalls();
+    const newWalls = computeWallsFromVertices(vertices, state.room.height);
+    set({
+      room: { ...state.room, shapeType, width, length, vertices },
+      ...remapWallItems(oldWalls, newWalls, state),
+      selectedVertexIndex: null,
+    });
   },
 
   updateVertex: (index, point) => {
     set((state) => {
-      const newVertices = [...state.room.vertices];
-      newVertices[index] = point;
+      const vertices = [...state.room.vertices];
+      vertices[index] = point;
+      const b = getBounds(vertices);
       return {
         room: {
           ...state.room,
-          vertices: newVertices,
+          vertices,
           shapeType: 'polygon',
+          width: Math.round(b.maxX - b.minX),
+          length: Math.round(b.maxY - b.minY),
         },
       };
     });
   },
 
   addVertex: (point, afterIndex) => {
-    set((state) => {
-      const newVertices = [...state.room.vertices];
-      newVertices.splice(afterIndex + 1, 0, point);
-      return {
-        room: {
-          ...state.room,
-          vertices: newVertices,
-          shapeType: 'polygon',
-        },
-        selectedVertexIndex: afterIndex + 1,
-      };
+    const state = get();
+    const vertices = [...state.room.vertices];
+    vertices.splice(afterIndex + 1, 0, point);
+    const oldWalls = state.getWalls();
+    const newWalls = computeWallsFromVertices(vertices, state.room.height);
+    set({
+      room: { ...state.room, vertices, shapeType: 'polygon' },
+      ...remapWallItems(oldWalls, newWalls, state),
+      selectedId: null,
+      selectedType: 'vertex',
+      selectedVertexIndex: afterIndex + 1,
     });
   },
 
   removeVertex: (index) => {
-    set((state) => {
-      if (state.room.vertices.length <= 3) return state; // maintain valid polygon
-      const newVertices = state.room.vertices.filter((_, i) => i !== index);
-      return {
-        room: {
-          ...state.room,
-          vertices: newVertices,
-          shapeType: 'polygon',
-        },
-        selectedVertexIndex: null,
-      };
+    const state = get();
+    if (state.room.vertices.length <= 3) return;
+    const vertices = state.room.vertices.filter((_, i) => i !== index);
+    const oldWalls = state.getWalls();
+    const newWalls = computeWallsFromVertices(vertices, state.room.height);
+    const b = getBounds(vertices);
+    set({
+      room: {
+        ...state.room,
+        vertices,
+        shapeType: 'polygon',
+        width: Math.round(b.maxX - b.minX),
+        length: Math.round(b.maxY - b.minY),
+      },
+      ...remapWallItems(oldWalls, newWalls, state),
+      activeWallId: newWalls.some((w) => w.id === state.activeWallId) ? state.activeWallId : 'wall-0',
+      selectedVertexIndex: null,
+      selectedType: null,
     });
   },
 
-  setWallColor: (color) => {
-    set((state) => ({
-      room: { ...state.room, wallColor: color },
-    }));
-  },
+  setWallColor: (color) => set((state) => ({ room: { ...state.room, wallColor: color } })),
 
-  setFloorColor: (color, material) => {
+  setFloorColor: (color, material) =>
     set((state) => ({
       room: {
         ...state.room,
         floorColor: color,
         floorMaterial: material || state.room.floorMaterial,
       },
-    }));
-  },
+    })),
+
+  /* ---------------------- Selection & viewport --------------------- */
 
   select: (id, type, vertexIndex = null) => {
-    set({
-      selectedId: id,
-      selectedType: type,
-      selectedVertexIndex: vertexIndex,
-    });
+    set({ selectedId: id, selectedType: type, selectedVertexIndex: vertexIndex });
   },
 
-  clearSelection: () => {
-    set({
-      selectedId: null,
-      selectedType: null,
-      selectedVertexIndex: null,
-    });
-  },
+  clearSelection: () => set({ selectedId: null, selectedType: null, selectedVertexIndex: null }),
 
-  setActiveWall: (wallId) => {
-    set({ activeWallId: wallId });
-  },
+  setActiveWall: (wallId) => set({ activeWallId: wallId }),
 
-  setViewMode: (mode) => {
-    set({ viewMode: mode });
-  },
+  setViewMode: (mode) => set({ viewMode: mode, selectedVertexIndex: null }),
 
-  toggleDimensions: () => {
-    set((state) => ({ showDimensions: !state.showDimensions }));
-  },
+  toggleDimensions: () => set((s) => ({ showDimensions: !s.showDimensions })),
+  toggleGrid: () => set((s) => ({ showGrid: !s.showGrid })),
+  toggleSnapToGrid: () => set((s) => ({ snapToGrid: !s.snapToGrid })),
 
-  toggleGrid: () => {
-    set((state) => ({ showGrid: !state.showGrid }));
-  },
+  resetCamera: (preset) =>
+    set((s) => ({
+      cameraResetKey: s.cameraResetKey + 1,
+      cameraPreset: preset || s.cameraPreset,
+    })),
 
-  toggleSnapToGrid: () => {
-    set((state) => ({ snapToGrid: !state.snapToGrid }));
-  },
+  requestScreenshot: () => set((s) => ({ screenshotKey: s.screenshotKey + 1 })),
 
-  resetCamera: () => {
-    set((state) => ({ cameraResetKey: state.cameraResetKey + 1 }));
-  },
+  setLayoutModalOpen: (open) => set({ layoutModalOpen: open }),
+  setAddArtworkModalOpen: (open) => set({ addArtworkModalOpen: open }),
+  setProjectModalOpen: (open) => set({ projectModalOpen: open }),
+  setHelpModalOpen: (open) => set({ helpModalOpen: open }),
+  setGuideModalOpen: (open) => set({ guideModalOpen: open }),
+  setLeftPanelOpen: (open) => set({ leftPanelOpen: open, rightPanelOpen: open ? false : get().rightPanelOpen }),
+  setRightPanelOpen: (open) => set({ rightPanelOpen: open, leftPanelOpen: open ? false : get().leftPanelOpen }),
 
-  setLayoutModalOpen: (open) => {
-    set({ layoutModalOpen: open });
-  },
+  setLayoutOptions: (options) =>
+    set((state) => ({ layoutOptions: { ...state.layoutOptions, ...options } })),
 
-  setAddArtworkModalOpen: (open) => {
-    set({ addArtworkModalOpen: open });
-  },
-
-  setProjectModalOpen: (open) => {
-    set({ projectModalOpen: open });
-  },
-
-  setLayoutOptions: (options) => {
-    set((state) => ({
-      layoutOptions: { ...state.layoutOptions, ...options },
-    }));
-  },
+  /* ---------------------------- Furniture -------------------------- */
 
   addFurniture: (item) => {
-    const newItem: Furniture = {
-      ...item,
-      id: `furn-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    };
+    const newItem: Furniture = { ...item, id: uid('furn') };
     set((state) => ({
       furniture: [...state.furniture, newItem],
       selectedId: newItem.id,
@@ -427,32 +443,26 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
     return newItem;
   },
 
-  updateFurniture: (id, partial) => {
+  updateFurniture: (id, partial) =>
     set((state) => ({
       furniture: state.furniture.map((f) => (f.id === id ? { ...f, ...partial } : f)),
-    }));
-  },
+    })),
 
-  removeFurniture: (id) => {
+  removeFurniture: (id) =>
     set((state) => ({
       furniture: state.furniture.filter((f) => f.id !== id),
       selectedId: state.selectedId === id ? null : state.selectedId,
       selectedType: state.selectedId === id ? null : state.selectedType,
-    }));
-  },
+    })),
 
   duplicateFurniture: (id) => {
     const item = get().furniture.find((f) => f.id === id);
     if (!item) return null;
     const duplicated: Furniture = {
       ...item,
-      id: `furn-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      name: `${item.name} (Copia)`,
-      position: {
-        x: item.position.x + 20,
-        y: item.position.y,
-        z: item.position.z + 20,
-      },
+      id: uid('furn'),
+      name: `${item.name} (copia)`,
+      position: { x: item.position.x + 30, y: item.position.y, z: item.position.z + 30 },
     };
     set((state) => ({
       furniture: [...state.furniture, duplicated],
@@ -462,362 +472,303 @@ export const useRoomStore = create<RoomStoreState>((set, get) => ({
     return duplicated;
   },
 
+  /* ----------------------------- Artworks -------------------------- */
+
   addArtwork: (item) => {
-    const newItem: Artwork = {
-      ...item,
-      id: `art-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    };
+    const newItem: Artwork = { ...item, id: uid('art') };
     set((state) => ({
       artworks: [...state.artworks, newItem],
       selectedId: newItem.id,
       selectedType: 'artwork',
+      activeWallId: newItem.wallId,
     }));
     return newItem;
   },
 
-  updateArtwork: (id, partial) => {
+  updateArtwork: (id, partial) =>
     set((state) => ({
       artworks: state.artworks.map((a) => (a.id === id ? { ...a, ...partial } : a)),
-    }));
-  },
+    })),
 
-  removeArtwork: (id) => {
+  removeArtwork: (id) =>
     set((state) => ({
       artworks: state.artworks.filter((a) => a.id !== id),
       selectedId: state.selectedId === id ? null : state.selectedId,
       selectedType: state.selectedId === id ? null : state.selectedType,
-    }));
-  },
+    })),
 
   duplicateArtwork: (id) => {
-    const item = get().artworks.find((a) => a.id === id);
+    const state = get();
+    const item = state.artworks.find((a) => a.id === id);
     if (!item) return null;
     const { totalWidth } = getArtworkTotalDimensions(item);
-    const duplicated: Artwork = {
-      ...item,
-      id: `art-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-      name: `${item.name} (Copia)`,
-      u: item.u + totalWidth + 15,
-    };
-    set((state) => ({
-      artworks: [...state.artworks, duplicated],
+    const wall = state.getWalls().find((w) => w.id === item.wallId);
+    let u = item.u + totalWidth + 10;
+    if (wall && u + totalWidth > wall.length) u = Math.max(0, item.u - totalWidth - 10);
+    const duplicated: Artwork = { ...item, id: uid('art'), name: `${item.name} (copia)`, u };
+    set((s) => ({
+      artworks: [...s.artworks, duplicated],
       selectedId: duplicated.id,
       selectedType: 'artwork',
     }));
     return duplicated;
   },
 
-  moveArtwork: (id, u, elevationY, wallId) => {
+  moveArtwork: (id, u, elevationY, wallId) =>
     set((state) => ({
-      artworks: state.artworks.map((a) => {
-        if (a.id !== id) return a;
-        return {
-          ...a,
-          u: Math.max(0, u),
-          elevationY: Math.max(0, elevationY),
-          wallId: wallId || a.wallId,
-        };
-      }),
-    }));
-  },
+      artworks: state.artworks.map((a) =>
+        a.id !== id
+          ? a
+          : { ...a, u: Math.max(0, u), elevationY: Math.max(0, elevationY), wallId: wallId || a.wallId }
+      ),
+    })),
+
+  /* ----------------------------- Openings -------------------------- */
 
   addDoor: (door) => {
-    const newItem: Door = {
-      ...door,
-      id: `door-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    };
-    set((state) => ({
-      doors: [...state.doors, newItem],
-      selectedId: newItem.id,
-      selectedType: 'door',
-    }));
+    const newItem: Door = { ...door, id: uid('door') };
+    set((state) => ({ doors: [...state.doors, newItem], selectedId: newItem.id, selectedType: 'door' }));
     return newItem;
   },
 
-  updateDoor: (id, partial) => {
-    set((state) => ({
-      doors: state.doors.map((d) => (d.id === id ? { ...d, ...partial } : d)),
-    }));
-  },
+  updateDoor: (id, partial) =>
+    set((state) => ({ doors: state.doors.map((d) => (d.id === id ? { ...d, ...partial } : d)) })),
 
-  removeDoor: (id) => {
+  removeDoor: (id) =>
     set((state) => ({
       doors: state.doors.filter((d) => d.id !== id),
       selectedId: state.selectedId === id ? null : state.selectedId,
       selectedType: state.selectedId === id ? null : state.selectedType,
-    }));
-  },
+    })),
 
   addWindow: (win) => {
-    const newItem: Window = {
-      ...win,
-      id: `win-${Date.now()}-${Math.floor(Math.random() * 1000)}`,
-    };
-    set((state) => ({
-      windows: [...state.windows, newItem],
-      selectedId: newItem.id,
-      selectedType: 'window',
-    }));
+    const newItem: Window = { ...win, id: uid('win') };
+    set((state) => ({ windows: [...state.windows, newItem], selectedId: newItem.id, selectedType: 'window' }));
     return newItem;
   },
 
-  updateWindow: (id, partial) => {
-    set((state) => ({
-      windows: state.windows.map((w) => (w.id === id ? { ...w, ...partial } : w)),
-    }));
-  },
+  updateWindow: (id, partial) =>
+    set((state) => ({ windows: state.windows.map((w) => (w.id === id ? { ...w, ...partial } : w)) })),
 
-  removeWindow: (id) => {
+  removeWindow: (id) =>
     set((state) => ({
       windows: state.windows.filter((w) => w.id !== id),
       selectedId: state.selectedId === id ? null : state.selectedId,
       selectedType: state.selectedId === id ? null : state.selectedType,
-    }));
+    })),
+
+  /* ------------------------ Selection helpers ---------------------- */
+
+  deleteSelected: () => {
+    const { selectedId, selectedType, selectedVertexIndex, room } = get();
+    if (selectedType === 'vertex' && selectedVertexIndex !== null && room.shapeType === 'polygon') {
+      get().removeVertex(selectedVertexIndex);
+      return;
+    }
+    if (!selectedId) return;
+    if (selectedType === 'furniture') get().removeFurniture(selectedId);
+    else if (selectedType === 'artwork') get().removeArtwork(selectedId);
+    else if (selectedType === 'door') get().removeDoor(selectedId);
+    else if (selectedType === 'window') get().removeWindow(selectedId);
   },
 
-  applyProposal: (proposal) => {
-    set((state) => {
-      // Remove previous artworks on this wall
-      const remainingArtworks = state.artworks.filter((a) => a.wallId !== proposal.wallId);
-
-      // Add new placed artworks from proposal
-      const newArtworks: Artwork[] = proposal.placements.map((p, idx) => ({
-        id: p.artworkId.startsWith('art-') ? p.artworkId : `art-${Date.now()}-${idx}`,
-        name: p.name,
-        imageUrl: p.imageUrl,
-        wallId: proposal.wallId,
-        u: p.u,
-        elevationY: p.elevationY,
-        width: p.width,
-        height: p.height,
-        frame: p.frame,
-      }));
-
-      return {
-        artworks: [...remainingArtworks, ...newArtworks],
-        layoutModalOpen: false,
-        activeWallId: proposal.wallId,
-        selectedId: newArtworks[0]?.id || null,
-        selectedType: newArtworks[0] ? 'artwork' : null,
-      };
-    });
+  duplicateSelected: () => {
+    const { selectedId, selectedType } = get();
+    if (!selectedId) return;
+    if (selectedType === 'furniture') get().duplicateFurniture(selectedId);
+    else if (selectedType === 'artwork') get().duplicateArtwork(selectedId);
   },
 
-  loadProject: (project) => {
-    set({
-      room: project.room,
-      doors: project.doors,
-      windows: project.windows,
-      furniture: project.furniture,
-      artworks: project.artworks,
-      activeWallId: project.activeWallId || 'wall-0',
-      selectedId: null,
-      selectedType: null,
-      projectModalOpen: false,
-    });
-  },
-
-  resetToTemplate: (templateId) => {
-    if (templateId === 'living-sofa') {
-      const width = 500;
-      const length = 400;
-      const height = 280;
-      set({
-        room: {
-          shapeType: 'rectangular',
-          width,
-          length,
-          height,
-          vertices: createRectangleVertices(width, length),
-          wallColor: '#f5f5f0',
-          floorColor: '#bfa07d',
-          floorMaterial: 'wood',
-        },
-        furniture: [
-          {
-            id: 'furn-sofa-1',
-            name: 'Divano 3 Posti',
-            width: 230,
-            height: 85,
-            depth: 95,
-            position: { x: 250, y: 0, z: 50 },
-            rotationY: 0,
-            color: '#607274',
-          },
-          {
-            id: 'furn-sideboard-1',
-            name: 'Madia Rovere',
-            width: 180,
-            height: 75,
-            depth: 45,
-            position: { x: 475, y: 0, z: 200 },
-            rotationY: 90,
-            color: '#b08968',
-          },
-        ],
-        doors: [
-          {
-            id: 'door-1',
-            name: 'Porta d’Ingresso',
-            wallId: 'wall-2',
-            u: 80,
-            width: 90,
-            height: 215,
-            elevationY: 0,
-            frameColor: '#3f3f46',
-          },
-        ],
-        windows: [
-          {
-            id: 'win-1',
-            name: 'Finestra Panoramica',
-            wallId: 'wall-3',
-            u: 140,
-            width: 130,
-            height: 140,
-            elevationY: 90,
-            frameColor: '#3f3f46',
-          },
-        ],
-        artworks: [
-          {
-            id: 'art-1',
-            name: CURATED_ARTWORKS[0].title,
-            imageUrl: CURATED_ARTWORKS[0].url,
-            wallId: 'wall-0',
-            u: 190,
-            elevationY: 125,
-            width: 120,
-            height: 80,
-            frame: {
-              enabled: true,
-              width: 3,
-              depth: 3,
-              color: '#18181b',
-              matWidth: 4,
-              matColor: '#ffffff',
-            },
-          },
-        ],
-        activeWallId: 'wall-0',
-        selectedId: null,
-        selectedType: null,
-      });
-    } else if (templateId === 'l-shaped-gallery') {
-      // Irregular L-shaped room
-      const lVertices: Point2D[] = [
-        { x: 0, y: 0 },
-        { x: 600, y: 0 },
-        { x: 600, y: 350 },
-        { x: 350, y: 350 },
-        { x: 350, y: 600 },
-        { x: 0, y: 600 },
-      ];
-      set({
-        room: {
-          shapeType: 'polygon',
-          width: 600,
-          length: 600,
-          height: 300,
-          vertices: lVertices,
-          wallColor: '#f8fafc',
-          floorColor: '#b8b5ad',
-          floorMaterial: 'concrete',
-        },
-        furniture: [
-          {
-            id: 'furn-bench',
-            name: 'Panca da Galleria',
-            width: 180,
-            height: 45,
-            depth: 55,
-            position: { x: 300, y: 0, z: 175 },
-            rotationY: 0,
-            color: '#393e46',
-          },
-        ],
-        doors: [
-          {
-            id: 'door-l1',
-            name: 'Ingresso Principale',
-            wallId: 'wall-4',
-            u: 80,
-            width: 100,
-            height: 220,
-            elevationY: 0,
-            frameColor: '#18181b',
-          },
-        ],
-        windows: [
-          {
-            id: 'win-l1',
-            name: 'Vetrata a Nastro',
-            wallId: 'wall-1',
-            u: 80,
-            width: 200,
-            height: 120,
-            elevationY: 110,
-            frameColor: '#18181b',
-          },
-        ],
-        artworks: [
-          {
-            id: 'art-g1',
-            name: CURATED_ARTWORKS[1].title,
-            imageUrl: CURATED_ARTWORKS[1].url,
-            wallId: 'wall-0',
-            u: 150,
-            elevationY: 130,
-            width: 90,
-            height: 90,
-            frame: {
-              enabled: true,
-              width: 3.5,
-              depth: 3,
-              color: '#18181b',
-              matWidth: 5,
-              matColor: '#ffffff',
-            },
-          },
-          {
-            id: 'art-g2',
-            name: CURATED_ARTWORKS[2].title,
-            imageUrl: CURATED_ARTWORKS[2].url,
-            wallId: 'wall-0',
-            u: 300,
-            elevationY: 130,
-            width: 80,
-            height: 100,
-            frame: {
-              enabled: true,
-              width: 3.5,
-              depth: 3,
-              color: '#18181b',
-              matWidth: 5,
-              matColor: '#ffffff',
-            },
-          },
-        ],
-        activeWallId: 'wall-0',
-        selectedId: null,
-        selectedType: null,
-      });
+  nudgeSelected: (dx, dy) => {
+    const { selectedId, selectedType } = get();
+    if (!selectedId) return;
+    if (selectedType === 'artwork') {
+      const a = get().artworks.find((x) => x.id === selectedId);
+      if (a) get().moveArtwork(a.id, a.u + dx, a.elevationY + dy);
+    } else if (selectedType === 'furniture') {
+      const f = get().furniture.find((x) => x.id === selectedId);
+      // In plan coordinates "up" on screen is -z
+      if (f) get().updateFurniture(f.id, { position: { ...f.position, x: f.position.x + dx, z: f.position.z - dy } });
+    } else if (selectedType === 'door') {
+      const d = get().doors.find((x) => x.id === selectedId);
+      if (d) get().updateDoor(d.id, { u: Math.max(0, d.u + dx) });
+    } else if (selectedType === 'window') {
+      const w = get().windows.find((x) => x.id === selectedId);
+      if (w) get().updateWindow(w.id, { u: Math.max(0, w.u + dx), elevationY: Math.max(0, w.elevationY + dy) });
     }
   },
 
-  exportProjectJSON: () => {
-    const { room, doors, windows, furniture, artworks, activeWallId } = get();
+  /* ----------------------------- Layout ---------------------------- */
+
+  applyProposal: (proposal) => {
+    set((state) => {
+      const usedIds = new Set(proposal.placements.map((p) => p.artworkId));
+      // Artworks used by the proposal are *moved* to this wall; others on this wall are removed
+      const remaining = state.artworks.filter((a) => a.wallId !== proposal.wallId && !usedIds.has(a.id));
+
+      const newArtworks: Artwork[] = proposal.placements.map((p) => {
+        const existing = state.artworks.find((a) => a.id === p.artworkId);
+        return {
+          id: existing ? existing.id : uid('art'),
+          name: p.name,
+          imageUrl: p.imageUrl,
+          wallId: proposal.wallId,
+          u: Math.round(p.u * 10) / 10,
+          elevationY: Math.round(p.elevationY * 10) / 10,
+          width: p.width,
+          height: p.height,
+          frame: p.frame,
+        };
+      });
+
+      return {
+        artworks: [...remaining, ...newArtworks],
+        layoutModalOpen: false,
+        activeWallId: proposal.wallId,
+        selectedId: null,
+        selectedType: null,
+      };
+    });
+    get().notify(`Disposizione “${proposal.title}” applicata`, 'success');
+  },
+
+  /* --------------------------- Projects ---------------------------- */
+
+  loadProject: (project) => {
+    const scene = normalizeScene(project);
+    if (!scene) return false;
+    set({
+      ...scene,
+      selectedId: null,
+      selectedType: null,
+      selectedVertexIndex: null,
+      projectModalOpen: false,
+      cameraResetKey: get().cameraResetKey + 1,
+    });
+    return true;
+  },
+
+  resetToTemplate: (templateId) => {
+    const tpl = ROOM_TEMPLATES.find((t) => t.id === templateId);
+    if (!tpl) return;
+    set({
+      ...tpl.build(),
+      selectedId: null,
+      selectedType: null,
+      selectedVertexIndex: null,
+      cameraResetKey: get().cameraResetKey + 1,
+    });
+    get().notify(`Modello “${tpl.name}” caricato`, 'success');
+  },
+
+  exportProjectJSON: (name) => {
     const data: ProjectData = {
-      id: `artwall-${Date.now()}`,
-      name: `Progetto Stanza ${new Date().toLocaleDateString('it-IT')}`,
+      id: uid('artwall'),
+      name: name || `Progetto ${new Date().toLocaleDateString('it-IT')}`,
       updatedAt: new Date().toISOString(),
-      room,
-      doors,
-      windows,
-      furniture,
-      artworks,
-      activeWallId,
+      ...sceneOf(get()),
     };
     return JSON.stringify(data, null, 2);
   },
+
+  /* ---------------------------- History ---------------------------- */
+
+  undo: () => {
+    const { past, future } = get();
+    if (past.length === 0) return;
+    const prev = past[past.length - 1];
+    applyingHistory = true;
+    set({
+      ...prev,
+      past: past.slice(0, -1),
+      future: [sceneOf(get()), ...future].slice(0, HISTORY_LIMIT),
+    });
+    applyingHistory = false;
+    endBurst();
+    sanitizeSelection();
+  },
+
+  redo: () => {
+    const { past, future } = get();
+    if (future.length === 0) return;
+    const next = future[0];
+    applyingHistory = true;
+    set({
+      ...next,
+      past: [...past, sceneOf(get())].slice(-HISTORY_LIMIT),
+      future: future.slice(1),
+    });
+    applyingHistory = false;
+    endBurst();
+    sanitizeSelection();
+  },
+
+  /* ----------------------------- Toasts ---------------------------- */
+
+  notify: (message, tone = 'info') => {
+    const id = ++toastCounter;
+    set((s) => ({ toasts: [...s.toasts.slice(-3), { id, message, tone }] }));
+    setTimeout(() => get().dismissToast(id), 3200);
+  },
+
+  dismissToast: (id) => set((s) => ({ toasts: s.toasts.filter((t) => t.id !== id) })),
 }));
+
+/* ------------------------------------------------------------------ */
+/* History recorder + autosave                                         */
+/* ------------------------------------------------------------------ */
+
+let applyingHistory = false;
+let burstTimer: ReturnType<typeof setTimeout> | null = null;
+let saveTimer: ReturnType<typeof setTimeout> | null = null;
+let quotaWarned = false;
+
+function endBurst() {
+  if (burstTimer) clearTimeout(burstTimer);
+  burstTimer = null;
+}
+
+function sanitizeSelection() {
+  const s = useRoomStore.getState();
+  if (!s.selectedId) return;
+  const exists =
+    s.furniture.some((x) => x.id === s.selectedId) ||
+    s.artworks.some((x) => x.id === s.selectedId) ||
+    s.doors.some((x) => x.id === s.selectedId) ||
+    s.windows.some((x) => x.id === s.selectedId) ||
+    s.getWalls().some((x) => x.id === s.selectedId);
+  if (!exists) s.clearSelection();
+}
+
+useRoomStore.subscribe((state, prev) => {
+  if (!sceneChanged(state, prev)) return;
+
+  // Autosave (debounced)
+  if (saveTimer) clearTimeout(saveTimer);
+  saveTimer = setTimeout(() => {
+    try {
+      localStorage.setItem(AUTOSAVE_KEY, JSON.stringify(sceneOf(useRoomStore.getState())));
+    } catch {
+      if (!quotaWarned) {
+        quotaWarned = true;
+        useRoomStore
+          .getState()
+          .notify('Spazio del browser esaurito: esporta il progetto in JSON per non perderlo.', 'error');
+      }
+    }
+  }, 600);
+
+  if (applyingHistory) return;
+
+  // A "burst" of rapid changes (e.g. a drag) becomes a single undo step
+  if (!burstTimer) {
+    useRoomStore.setState((s) => ({
+      past: [...s.past, sceneOf(prev)].slice(-HISTORY_LIMIT),
+      future: [],
+    }));
+  }
+  endBurst();
+  burstTimer = setTimeout(() => {
+    burstTimer = null;
+  }, 500);
+});

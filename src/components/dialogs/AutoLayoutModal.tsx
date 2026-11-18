@@ -3,434 +3,252 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { useRoomStore } from '../../store/useRoomStore';
-import { getWallObstacles } from '../../utils/geometry';
-import { generateLayoutProposals, LayoutOptions } from '../../utils/layoutAlgorithm';
-import { LayoutProposal, LayoutStrategyType } from '../../types/room';
+import { getWallObstacles, getArtworkTotalDimensions } from '../../utils/geometry';
+import { generateLayoutProposals } from '../../utils/layoutAlgorithm';
+import { LayoutProposal, LayoutStrategyType, ProjectedObstacle, Wall } from '../../types/room';
 import { CustomNumberInput } from '../ui/CustomNumberInput';
-import {
-  Sparkles,
-  X,
-  Check,
-  Sliders,
-  Grid,
-  Columns,
-  Maximize2,
-  Box,
-  Layers,
-} from 'lucide-react';
+import { Modal } from '../ui/Modal';
+import { Sparkles, Check, SlidersHorizontal, ChevronDown, AlertTriangle, Wand2 } from 'lucide-react';
+
+const STRATEGIES: { id: LayoutStrategyType | 'all'; label: string }[] = [
+  { id: 'all', label: 'Tutte' },
+  { id: 'furniture_centered', label: 'Sul mobile' },
+  { id: 'symmetrical', label: 'Simmetriche' },
+  { id: 'grid', label: 'Griglia' },
+  { id: 'organic', label: 'Salon' },
+];
+
+const STRATEGY_LABEL: Record<LayoutStrategyType, string> = {
+  furniture_centered: 'Sul mobile',
+  symmetrical: 'Simmetrico',
+  grid: 'Griglia',
+  organic: 'Salon',
+};
+
+const WallPreview: React.FC<{
+  wall: Wall;
+  wallColor: string;
+  obstacles: ProjectedObstacle[];
+  proposal: LayoutProposal;
+  eyeLevel: number;
+  detailed?: boolean;
+}> = ({ wall, wallColor, obstacles, proposal, eyeLevel, detailed }) => {
+  const W = wall.length;
+  const H = wall.height;
+  const k = Math.max(W / 1.7, H) / 300;
+  const pad = detailed ? 14 * k : 0;
+  return (
+    <svg viewBox={`${-pad} ${-pad} ${W + pad * 2} ${H + pad * 2}`} className="w-full h-full" preserveAspectRatio="xMidYMid meet">
+      <rect x={0} y={0} width={W} height={H} fill={wallColor} rx={detailed ? 2 * k : 0} />
+      {detailed && (
+        <line x1={0} y1={H - eyeLevel} x2={W} y2={H - eyeLevel} stroke="#c99a45" strokeOpacity={0.6} strokeWidth={0.8 * k} strokeDasharray={`${5 * k} ${4 * k}`} />
+      )}
+      {obstacles.map((o) => (
+        <rect
+          key={o.id}
+          x={o.uMin}
+          y={H - o.vMax}
+          width={o.uMax - o.uMin}
+          height={o.vMax - o.vMin}
+          fill={o.type === 'window' ? '#bfe3f5' : o.type === 'door' ? '#26262c' : o.color || '#607274'}
+          opacity={o.type === 'window' ? 0.7 : 0.9}
+          rx={1.5 * k}
+        />
+      ))}
+      {proposal.placements.map((p, i) => {
+        const d = getArtworkTotalDimensions(p);
+        const inset = p.frame.enabled ? p.frame.width + p.frame.matWidth : 0;
+        const y = H - p.elevationY - d.totalHeight;
+        return (
+          <g key={i}>
+            {p.frame.enabled && <rect x={p.u} y={y} width={d.totalWidth} height={d.totalHeight} fill={p.frame.color} />}
+            {p.frame.enabled && p.frame.matWidth > 0 && (
+              <rect x={p.u + p.frame.width} y={y + p.frame.width} width={d.totalWidth - p.frame.width * 2} height={d.totalHeight - p.frame.width * 2} fill={p.frame.matColor} />
+            )}
+            <image href={p.imageUrl} x={p.u + inset} y={y + inset} width={p.width} height={p.height} preserveAspectRatio="xMidYMid slice" />
+          </g>
+        );
+      })}
+    </svg>
+  );
+};
 
 export const AutoLayoutModal: React.FC = () => {
-  const {
-    room,
-    furniture,
-    doors,
-    windows,
-    artworks,
-    activeWallId,
-    layoutModalOpen,
-    layoutOptions,
-    getWalls,
-    setActiveWall,
-    setLayoutModalOpen,
-    setLayoutOptions,
-    applyProposal,
-  } = useRoomStore();
+  const open = useRoomStore((s) => s.layoutModalOpen);
+  const room = useRoomStore((s) => s.room);
+  const furniture = useRoomStore((s) => s.furniture);
+  const doors = useRoomStore((s) => s.doors);
+  const windows = useRoomStore((s) => s.windows);
+  const artworks = useRoomStore((s) => s.artworks);
+  const activeWallId = useRoomStore((s) => s.activeWallId);
+  const layoutOptions = useRoomStore((s) => s.layoutOptions);
+  const { getWalls, setActiveWall, setLayoutModalOpen, setLayoutOptions, applyProposal } = useRoomStore.getState();
 
-  const [selectedWallId, setSelectedWallId] = useState(activeWallId || 'wall-0');
-  const [selectedStrategy, setSelectedStrategy] = useState<LayoutStrategyType | 'all'>('all');
+  const [strategy, setStrategy] = useState<LayoutStrategyType | 'all'>('all');
   const [selectedProposalId, setSelectedProposalId] = useState<string | null>(null);
+  const [showParams, setShowParams] = useState(false);
 
-  // Sync selected wall when modal opens or active wall changes
-  React.useEffect(() => {
-    if (layoutModalOpen && activeWallId) {
-      setSelectedWallId(activeWallId);
-      setSelectedProposalId(null);
-    }
-  }, [layoutModalOpen, activeWallId]);
+  useEffect(() => {
+    if (open) setSelectedProposalId(null);
+  }, [open, activeWallId]);
 
-  const walls = useMemo(() => getWalls(), [room.vertices, room.height, getWalls]);
-  const currentWall = useMemo(
-    () => walls.find((w) => w.id === selectedWallId) || walls[0],
-    [walls, selectedWallId]
+  const walls = useMemo(() => getWalls(), [room.vertices, room.height]); // eslint-disable-line react-hooks/exhaustive-deps
+  const wall = walls.find((w) => w.id === activeWallId) || walls[0];
+
+  const obstacles = useMemo(() => (wall ? getWallObstacles(wall, furniture, doors, windows) : []), [wall, furniture, doors, windows]);
+
+  const proposals = useMemo(
+    () => (open && wall ? generateLayoutProposals(wall, obstacles, artworks, layoutOptions) : []),
+    [open, wall, obstacles, artworks, layoutOptions]
   );
 
-  // Compute obstacles on selected wall
-  const obstacles = useMemo(() => {
-    if (!currentWall) return [];
-    return getWallObstacles(currentWall, furniture, doors, windows);
-  }, [currentWall, furniture, doors, windows]);
-
-  // Generate proposals using geometric engine
-  const proposals = useMemo(() => {
-    if (!currentWall) return [];
-    return generateLayoutProposals(currentWall, obstacles, artworks, layoutOptions);
-  }, [currentWall, obstacles, artworks, layoutOptions]);
-
-  // Dynamic counts for each strategy
-  const strategyCounts = useMemo(() => {
-    return {
-      all: proposals.length,
-      furniture_centered: proposals.filter((p) => p.strategy === 'furniture_centered').length,
-      symmetrical: proposals.filter((p) => p.strategy === 'symmetrical').length,
-      grid: proposals.filter((p) => p.strategy === 'grid').length,
-      organic: proposals.filter((p) => p.strategy === 'organic').length,
-    };
+  const counts = useMemo(() => {
+    const c: Record<string, number> = { all: proposals.length };
+    for (const p of proposals) c[p.strategy] = (c[p.strategy] || 0) + 1;
+    return c;
   }, [proposals]);
 
-  // Filter proposals by strategy
-  const filteredProposals = useMemo(() => {
-    if (selectedStrategy === 'all') return proposals;
-    return proposals.filter((p) => p.strategy === selectedStrategy);
-  }, [proposals, selectedStrategy]);
+  const filtered = strategy === 'all' ? proposals : proposals.filter((p) => p.strategy === strategy);
+  const current = filtered.find((p) => p.id === selectedProposalId) || filtered[0] || null;
+  const existingOnWall = artworks.filter((a) => a.wallId === wall?.id).length;
 
-  if (!layoutModalOpen) return null;
-
-  // Resolved active proposal: prioritized within active filtered list
-  const currentSelectedProposal =
-    filteredProposals.find((p) => p.id === selectedProposalId) || filteredProposals[0] || null;
-
-  const handleApply = (proposal: LayoutProposal) => {
-    applyProposal(proposal);
-  };
-
-  const handleSelectStrategy = (strat: LayoutStrategyType | 'all') => {
-    setSelectedStrategy(strat);
-    if (strat === 'all') {
-      setSelectedProposalId(proposals[0]?.id || null);
-    } else {
-      const first = proposals.find((p) => p.strategy === strat);
-      setSelectedProposalId(first?.id || null);
-    }
-  };
-
-  const handleSelectWall = (wallId: string) => {
-    setSelectedWallId(wallId);
-    setActiveWall(wallId);
-    setSelectedProposalId(null);
-  };
+  if (!wall) return null;
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-in fade-in duration-150">
-      <div className="relative w-full max-w-5xl h-[88vh] bg-neutral-900 border border-neutral-800 rounded-xl shadow-2xl flex flex-col overflow-hidden text-neutral-100">
-        {/* Header */}
-        <div className="h-14 px-6 border-b border-neutral-800 flex items-center justify-between shrink-0 bg-neutral-900/80">
-          <div className="flex items-center gap-3">
-            <div className="w-8 h-8 rounded-lg bg-cyan-600/20 border border-cyan-500/30 flex items-center justify-center text-cyan-400">
-              <Sparkles className="w-4 h-4" />
-            </div>
-            <div>
-              <h2 className="text-sm font-semibold tracking-wide">
-                Generatore Geometrico di Layout Parete
-              </h2>
-              <p className="text-[11px] text-neutral-400">
-                Calcolo automatico degli spazi liberi tenendo conto di mobili, porte e finestre
-              </p>
-            </div>
-          </div>
-          <button
-            onClick={() => setLayoutModalOpen(false)}
-            className="w-8 h-8 flex items-center justify-center rounded-lg hover:bg-neutral-800 text-neutral-400 hover:text-white transition-colors"
-          >
-            <X className="w-4 h-4" />
-          </button>
+    <Modal
+      open={open}
+      onClose={() => setLayoutModalOpen(false)}
+      title="Disposizione automatica"
+      subtitle="Composizioni calcolate sugli spazi liberi della parete, tenendo conto di mobili, porte e finestre."
+      icon={<Sparkles className="w-4 h-4" />}
+      size="xl"
+      bodyClassName="flex flex-col"
+    >
+      {/* Controls */}
+      <div className="px-5 sm:px-6 py-3 border-b hairline flex flex-col lg:flex-row lg:items-center gap-3 justify-between bg-ink-950/30">
+        <div className="seg overflow-x-auto max-w-full">
+          {walls.map((w) => (
+            <button key={w.id} className="seg-item" data-active={w.id === wall.id} onClick={() => setActiveWall(w.id)}>
+              {w.name}
+              <span className="font-mono text-[10.5px] text-ink-500">{Math.round(w.length)}</span>
+            </button>
+          ))}
         </div>
+        <div className="flex gap-1.5 overflow-x-auto">
+          {STRATEGIES.map((s) => (
+            <button
+              key={s.id}
+              onClick={() => {
+                setStrategy(s.id);
+                setSelectedProposalId(null);
+              }}
+              className={`h-7 px-3 rounded-full text-[12px] font-medium border whitespace-nowrap transition-colors ${
+                strategy === s.id ? 'bg-brass-500/15 border-brass-500/40 text-brass-300' : 'border-white/8 text-ink-400 hover:text-ink-100'
+              }`}
+            >
+              {s.label} <span className="opacity-60 font-mono">{counts[s.id] || 0}</span>
+            </button>
+          ))}
+        </div>
+      </div>
 
-        {/* Top Control Bar: Wall Selector & Parameters */}
-        <div className="p-4 bg-neutral-950/60 border-b border-neutral-800 flex flex-wrap items-center justify-between gap-4 shrink-0">
-          {/* Wall selection */}
-          <div className="flex items-center gap-2">
-            <span className="text-xs text-neutral-400 font-medium">Parete:</span>
-            <div className="flex items-center gap-1 bg-neutral-900 p-1 rounded-md border border-neutral-800">
-              {walls.map((w) => (
+      <div className="flex-1 min-h-0 flex flex-col-reverse md:flex-row">
+        {/* Proposal list */}
+        <div className="md:w-[330px] shrink-0 md:border-r hairline p-4 flex flex-col gap-2.5 md:max-h-[62vh] md:overflow-y-auto scroll-area">
+          {filtered.length === 0 ? (
+            <div className="text-center py-10 px-4 text-[12.5px] text-ink-400 flex flex-col items-center gap-3">
+              <Wand2 className="w-6 h-6 text-ink-500" />
+              Nessuna composizione di questo tipo entra sulla parete con i margini attuali.
+              <button className="btn btn-secondary btn-sm" onClick={() => setShowParams(true)}>
+                Regola i parametri
+              </button>
+            </div>
+          ) : (
+            filtered.map((p) => {
+              const active = current?.id === p.id;
+              return (
                 <button
-                  key={w.id}
-                  onClick={() => handleSelectWall(w.id)}
-                  className={`px-3 py-1 text-xs font-medium rounded transition-colors ${
-                    selectedWallId === w.id
-                      ? 'bg-neutral-800 text-white border border-neutral-700 font-semibold shadow-sm'
-                      : 'text-neutral-400 hover:text-white hover:bg-neutral-850'
+                  key={p.id}
+                  onClick={() => setSelectedProposalId(p.id)}
+                  className={`text-left rounded-xl p-2.5 flex gap-3 border transition-colors ${
+                    active ? 'border-brass-500/50 bg-brass-500/8' : 'border-white/6 hover:border-white/14 hover:bg-white/3'
                   }`}
                 >
-                  {w.name} ({Math.round(w.length)} cm)
+                  <div className="w-24 h-16 shrink-0 rounded-md overflow-hidden bg-ink-950">
+                    <WallPreview wall={wall} wallColor={room.wallColor} obstacles={obstacles} proposal={p} eyeLevel={layoutOptions.targetEyeLevel} />
+                  </div>
+                  <div className="min-w-0 flex-1">
+                    <p className="text-[12.5px] font-semibold text-ink-100 leading-snug line-clamp-2">{p.title}</p>
+                    <p className="text-[11px] text-ink-400 mt-1">
+                      {STRATEGY_LABEL[p.strategy]} · {p.metrics.artworksCount} quadri · {Math.round(p.metrics.totalSpanWidth)} cm
+                    </p>
+                  </div>
                 </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Strategy Filter Tabs with live counts */}
-          <div className="flex items-center gap-1 bg-neutral-900 p-1 rounded-md border border-neutral-800">
-            <button
-              onClick={() => handleSelectStrategy('all')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                selectedStrategy === 'all'
-                  ? 'bg-neutral-800 text-white shadow-sm border border-neutral-700 font-semibold'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-            >
-              Tutte ({strategyCounts.all})
-            </button>
-            <button
-              onClick={() => handleSelectStrategy('furniture_centered')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                selectedStrategy === 'furniture_centered'
-                  ? 'bg-neutral-800 text-cyan-300 shadow-sm border border-neutral-700 font-semibold'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-            >
-              Centrato su Mobile ({strategyCounts.furniture_centered})
-            </button>
-            <button
-              onClick={() => handleSelectStrategy('symmetrical')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                selectedStrategy === 'symmetrical'
-                  ? 'bg-neutral-800 text-cyan-300 shadow-sm border border-neutral-700 font-semibold'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-            >
-              Simmetrico ({strategyCounts.symmetrical})
-            </button>
-            <button
-              onClick={() => handleSelectStrategy('grid')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                selectedStrategy === 'grid'
-                  ? 'bg-neutral-800 text-cyan-300 shadow-sm border border-neutral-700 font-semibold'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-            >
-              Griglia Geometrica ({strategyCounts.grid})
-            </button>
-            <button
-              onClick={() => handleSelectStrategy('organic')}
-              className={`px-3 py-1 text-xs font-medium rounded transition-all ${
-                selectedStrategy === 'organic'
-                  ? 'bg-neutral-800 text-cyan-300 shadow-sm border border-neutral-700 font-semibold'
-                  : 'text-neutral-400 hover:text-white'
-              }`}
-            >
-              Organico Salon ({strategyCounts.organic})
-            </button>
-          </div>
+              );
+            })
+          )}
         </div>
 
-        {/* Middle Body: Proposals List on Left, Large Interactive Schematic Preview on Right */}
-        <div className="flex-1 flex overflow-hidden">
-          {/* Proposals Cards List */}
-          <div className="w-80 md:w-96 border-r border-neutral-800 overflow-y-auto p-4 flex flex-col gap-3 bg-neutral-950/30">
-            {filteredProposals.length === 0 ? (
-              <div className="p-8 text-center text-neutral-400 text-xs flex flex-col items-center gap-3">
-                <p>Nessuna proposta per questa categoria su questa parete con le dimensioni attuali.</p>
-                <button
-                  onClick={() => handleSelectStrategy('all')}
-                  className="px-3 py-1.5 bg-neutral-800 hover:bg-neutral-700 text-white rounded text-xs transition-colors"
-                >
-                  Mostra tutte le proposte ({strategyCounts.all})
+        {/* Preview */}
+        <div className="flex-1 min-w-0 p-4 sm:p-6 flex flex-col gap-4">
+          {current ? (
+            <>
+              <div className="flex flex-col sm:flex-row sm:items-start justify-between gap-3">
+                <div>
+                  <h3 className="display text-[26px] leading-tight text-ink-100">{current.title}</h3>
+                  <p className="text-[12.5px] text-ink-400 mt-1 max-w-xl">{current.description}</p>
+                </div>
+                <button className="btn btn-primary shrink-0" onClick={() => applyProposal(current)}>
+                  <Check className="w-4 h-4" /> Applica
                 </button>
               </div>
-            ) : (
-              filteredProposals.map((prop) => {
-                const isSelected = currentSelectedProposal?.id === prop.id;
-                return (
-                  <div
-                    key={prop.id}
-                    onClick={() => setSelectedProposalId(prop.id)}
-                    className={`p-3.5 rounded-lg border text-left cursor-pointer transition-all ${
-                      isSelected
-                        ? 'bg-neutral-800/90 border-cyan-500/70 shadow-lg ring-1 ring-cyan-500/40'
-                        : 'bg-neutral-900 border-neutral-800 hover:border-neutral-700 hover:bg-neutral-850'
-                    }`}
-                  >
-                    <div className="flex items-center justify-between mb-1.5">
-                      <span className="text-xs font-semibold text-white">
-                        {prop.title}
-                      </span>
-                      <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-neutral-950 text-cyan-400 border border-neutral-800 uppercase">
-                        {prop.strategy === 'furniture_centered'
-                          ? 'Su Mobile'
-                          : prop.strategy === 'symmetrical'
-                          ? 'Simmetrico'
-                          : prop.strategy === 'grid'
-                          ? 'Griglia'
-                          : 'Organico'}
-                      </span>
-                    </div>
-
-                    <p className="text-[11px] text-neutral-400 line-clamp-2 mb-2.5">
-                      {prop.description}
-                    </p>
-
-                    <div className="flex items-center justify-between text-[11px] font-mono text-neutral-400 border-t border-neutral-800/80 pt-2">
-                      <span>{prop.metrics.artworksCount} Quadri</span>
-                      <span>Ingombro: {Math.round(prop.metrics.totalSpanWidth)} cm</span>
-                    </div>
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* Right Preview Section */}
-          <div className="flex-1 flex flex-col bg-neutral-950 p-6 overflow-hidden">
-            {currentSelectedProposal ? (
-              <div className="flex-1 flex flex-col justify-between">
-                <div>
-                  <div className="flex items-center justify-between mb-4">
-                    <div>
-                      <h3 className="text-base font-semibold text-white">
-                        {currentSelectedProposal.title}
-                      </h3>
-                      <p className="text-xs text-neutral-400">
-                        {currentSelectedProposal.description}
-                      </p>
-                    </div>
-
-                    <button
-                      onClick={() => handleApply(currentSelectedProposal)}
-                      className="flex items-center gap-2 px-4 py-2 bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold rounded-lg shadow-lg shadow-cyan-950 transition-all hover:scale-102"
-                    >
-                      <Check className="w-4 h-4" />
-                      Applica Questa Disposizione
-                    </button>
-                  </div>
-
-                  {/* Wall Schematic View */}
-                  <div className="w-full h-72 bg-neutral-900 border border-neutral-800 rounded-lg p-4 relative flex items-center justify-center overflow-hidden">
-                    <svg
-                      viewBox={`0 0 ${currentWall.length} ${currentWall.height}`}
-                      className="w-full h-full max-h-64 drop-shadow"
-                    >
-                      {/* Wall boundary */}
-                      <rect
-                        x="0"
-                        y="0"
-                        width={currentWall.length}
-                        height={currentWall.height}
-                        fill="#1a1e24"
-                        stroke="#334155"
-                        strokeWidth="1.5"
-                      />
-
-                      {/* Floor line */}
-                      <line
-                        x1="0"
-                        y1={currentWall.height}
-                        x2={currentWall.length}
-                        y2={currentWall.height}
-                        stroke="#64748b"
-                        strokeWidth="2"
-                      />
-
-                      {/* Obstacles */}
-                      {obstacles.map((obs) => {
-                        const obsW = obs.uMax - obs.uMin;
-                        const obsH = obs.vMax - obs.vMin;
-                        const obsY = currentWall.height - obs.vMax;
-                        return (
-                          <g key={obs.id}>
-                            <rect
-                              x={obs.uMin}
-                              y={obsY}
-                              width={obsW}
-                              height={obsH}
-                              fill={obs.color || '#475569'}
-                              fillOpacity="0.75"
-                              stroke="#94a3b8"
-                              strokeWidth="1"
-                            />
-                            <text
-                              x={obs.uMin + obsW / 2}
-                              y={obsY + obsH / 2}
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                              fill="#ffffff"
-                              fontSize="11"
-                              fontFamily="sans-serif"
-                            >
-                              {obs.name}
-                            </text>
-                          </g>
-                        );
-                      })}
-
-                      {/* Proposal Placements */}
-                      {currentSelectedProposal.placements.map((p, idx) => {
-                        const pY = currentWall.height - (p.elevationY + p.height);
-                        return (
-                          <g key={`prev-${idx}`}>
-                            <rect
-                              x={p.u}
-                              y={pY}
-                              width={p.width}
-                              height={p.height}
-                              fill="#0ea5e9"
-                              fillOpacity="0.4"
-                              stroke="#38bdf8"
-                              strokeWidth="2"
-                            />
-                            <text
-                              x={p.u + p.width / 2}
-                              y={pY + p.height / 2}
-                              textAnchor="middle"
-                              dominantBaseline="middle"
-                              fill="#ffffff"
-                              fontSize="10"
-                              fontWeight="600"
-                              fontFamily="sans-serif"
-                            >
-                              {p.name}
-                            </text>
-                          </g>
-                        );
-                      })}
-                    </svg>
-                  </div>
-                </div>
-
-                {/* Parameters Tuner Footer */}
-                <div className="bg-neutral-900 border border-neutral-800 rounded-lg p-4 grid grid-cols-2 sm:grid-cols-4 gap-4 mt-4">
-                  <CustomNumberInput
-                    label="Distanza da Mobili"
-                    value={layoutOptions.safetyMarginObstacles}
-                    onChange={(v) => setLayoutOptions({ safetyMarginObstacles: v })}
-                    min={5}
-                    max={50}
-                    step={1}
-                    unit="cm"
-                  />
-                  <CustomNumberInput
-                    label="Fuga tra Quadri"
-                    value={layoutOptions.interArtSpacing}
-                    onChange={(v) => setLayoutOptions({ interArtSpacing: v })}
-                    min={3}
-                    max={30}
-                    step={1}
-                    unit="cm"
-                  />
-                  <CustomNumberInput
-                    label="Margine Soffitto"
-                    value={layoutOptions.safetyMarginCeiling}
-                    onChange={(v) => setLayoutOptions({ safetyMarginCeiling: v })}
-                    min={10}
-                    max={60}
-                    step={1}
-                    unit="cm"
-                  />
-                  <CustomNumberInput
-                    label="Altezza Occhi Media"
-                    value={layoutOptions.targetEyeLevel}
-                    onChange={(v) => setLayoutOptions({ targetEyeLevel: v })}
-                    min={130}
-                    max={170}
-                    step={1}
-                    unit="cm"
-                  />
-                </div>
+              <div className="rounded-2xl bg-ink-950 border hairline p-3 sm:p-5 h-[34vh] min-h-[200px]">
+                <WallPreview wall={wall} wallColor={room.wallColor} obstacles={obstacles} proposal={current} eyeLevel={layoutOptions.targetEyeLevel} detailed />
               </div>
-            ) : null}
+              <div className="flex flex-wrap gap-2 text-[12px]">
+                {[
+                  ['Quadri', current.metrics.artworksCount],
+                  ['Larghezza gruppo', `${Math.round(current.metrics.totalSpanWidth)} cm`],
+                  ['Altezza gruppo', `${Math.round(current.metrics.totalSpanHeight)} cm`],
+                  ['Centro a', `${Math.round(current.metrics.averageElevation)} cm`],
+                ].map(([l, v]) => (
+                  <span key={l as string} className="rounded-full bg-ink-850 border hairline px-3 py-1 text-ink-400">
+                    {l} <span className="font-mono text-ink-100 ml-1">{v}</span>
+                  </span>
+                ))}
+              </div>
+              {existingOnWall > 0 && (
+                <p className="flex items-center gap-2 text-[12px] text-ink-400">
+                  <AlertTriangle className="w-3.5 h-3.5 text-brass-400 shrink-0" />
+                  Applicando, i {existingOnWall} quadri attuali di {wall.name} verranno sostituiti (Ctrl+Z per annullare).
+                </p>
+              )}
+            </>
+          ) : (
+            <div className="flex-1 flex items-center justify-center text-ink-500 text-sm">Nessuna proposta selezionata</div>
+          )}
+
+          <div className="rounded-xl border hairline">
+            <button className="w-full flex items-center justify-between px-4 py-3 text-[12.5px] font-medium text-ink-200" onClick={() => setShowParams(!showParams)}>
+              <span className="flex items-center gap-2">
+                <SlidersHorizontal className="w-4 h-4 text-brass-400" /> Parametri di calcolo
+              </span>
+              <ChevronDown className={`w-4 h-4 transition-transform ${showParams ? 'rotate-180' : ''}`} />
+            </button>
+            {showParams && (
+              <div className="px-4 pb-4 grid grid-cols-2 lg:grid-cols-5 gap-3">
+                <CustomNumberInput label="Altezza occhi" value={layoutOptions.targetEyeLevel} onChange={(v) => setLayoutOptions({ targetEyeLevel: v })} min={120} max={180} />
+                <CustomNumberInput label="Spazio tra quadri" value={layoutOptions.interArtSpacing} onChange={(v) => setLayoutOptions({ interArtSpacing: v })} min={2} max={40} />
+                <CustomNumberInput label="Distanza mobili" value={layoutOptions.safetyMarginObstacles} onChange={(v) => setLayoutOptions({ safetyMarginObstacles: v })} min={5} max={60} />
+                <CustomNumberInput label="Margine soffitto" value={layoutOptions.safetyMarginCeiling} onChange={(v) => setLayoutOptions({ safetyMarginCeiling: v })} min={5} max={80} />
+                <CustomNumberInput label="Margine pavimento" value={layoutOptions.safetyMarginFloor} onChange={(v) => setLayoutOptions({ safetyMarginFloor: v })} min={10} max={120} />
+              </div>
+            )}
           </div>
         </div>
       </div>
-    </div>
+    </Modal>
   );
 };
